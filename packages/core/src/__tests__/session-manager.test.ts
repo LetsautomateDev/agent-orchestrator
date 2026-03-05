@@ -193,7 +193,8 @@ describe("spawn", () => {
 
     const session = await sm.spawn({
       projectId: "my-app",
-      issueId: "this is a very long issue description that should be truncated to sixty characters maximum",
+      issueId:
+        "this is a very long issue description that should be truncated to sixty characters maximum",
     });
 
     expect(session.branch!.replace("feat/", "").length).toBeLessThanOrEqual(60);
@@ -341,9 +342,9 @@ describe("spawn", () => {
     it("throws when agent override plugin is not found", async () => {
       const sm = createSessionManager({ config, registry: registryWithMultipleAgents });
 
-      await expect(
-        sm.spawn({ projectId: "my-app", agent: "nonexistent" }),
-      ).rejects.toThrow("Agent plugin 'nonexistent' not found");
+      await expect(sm.spawn({ projectId: "my-app", agent: "nonexistent" })).rejects.toThrow(
+        "Agent plugin 'nonexistent' not found",
+      );
     });
 
     it("uses default agent when no override specified", async () => {
@@ -832,6 +833,96 @@ describe("list", () => {
     expect(sessions[0].activity).toBeNull();
   });
 
+  it("falls back to terminal output parsing when getActivityState returns null", async () => {
+    const runtimeWithOutput: Runtime = {
+      ...mockRuntime,
+      getOutput: vi.fn().mockResolvedValue("approval required"),
+    };
+    const agentWithNull: Agent = {
+      ...mockAgent,
+      getActivityState: vi.fn().mockResolvedValue(null),
+      detectActivity: vi.fn().mockReturnValue("waiting_input"),
+    };
+    const registryWithFallback: PluginRegistry = {
+      ...mockRegistry,
+      get: vi.fn().mockImplementation((slot: string) => {
+        if (slot === "runtime") return runtimeWithOutput;
+        if (slot === "agent") return agentWithNull;
+        return null;
+      }),
+    };
+
+    writeMetadata(sessionsDir, "app-1", {
+      worktree: "/tmp",
+      branch: "a",
+      status: "working",
+      project: "my-app",
+      runtimeHandle: JSON.stringify(makeHandle("rt-1")),
+    });
+
+    const sm = createSessionManager({ config, registry: registryWithFallback });
+    const sessions = await sm.list();
+
+    expect(agentWithNull.getActivityState).toHaveBeenCalled();
+    expect(agentWithNull.detectActivity).toHaveBeenCalled();
+    expect(sessions[0].activity).toBe("waiting_input");
+  });
+
+  it("auto-detects PR by branch when metadata.pr is missing", async () => {
+    const mockSCM: SCM = {
+      name: "mock-scm",
+      detectPR: vi.fn().mockResolvedValue({
+        number: 42,
+        url: "https://github.com/org/my-app/pull/42",
+        title: "feat: add health endpoint",
+        owner: "org",
+        repo: "my-app",
+        branch: "feat/health-endpoint",
+        baseBranch: "main",
+        isDraft: false,
+      }),
+      getPRState: vi.fn(),
+      mergePR: vi.fn(),
+      closePR: vi.fn(),
+      getCIChecks: vi.fn(),
+      getCISummary: vi.fn(),
+      getReviews: vi.fn(),
+      getReviewDecision: vi.fn(),
+      getPendingComments: vi.fn(),
+      getAutomatedComments: vi.fn(),
+      getMergeability: vi.fn(),
+    };
+
+    const registryWithScm: PluginRegistry = {
+      ...mockRegistry,
+      get: vi.fn().mockImplementation((slot: string) => {
+        if (slot === "runtime") return mockRuntime;
+        if (slot === "agent") return mockAgent;
+        if (slot === "scm") return mockSCM;
+        return null;
+      }),
+    };
+
+    writeMetadata(sessionsDir, "app-1", {
+      worktree: "/tmp",
+      branch: "feat/health-endpoint",
+      status: "working",
+      project: "my-app",
+      runtimeHandle: JSON.stringify(makeHandle("rt-1")),
+    });
+
+    const sm = createSessionManager({ config, registry: registryWithScm });
+    const sessions = await sm.list();
+
+    expect(mockSCM.detectPR).toHaveBeenCalled();
+    expect(sessions[0].pr?.url).toBe("https://github.com/org/my-app/pull/42");
+    expect(sessions[0].status).toBe("pr_open");
+
+    const raw = readMetadataRaw(sessionsDir, "app-1");
+    expect(raw?.["pr"]).toBe("https://github.com/org/my-app/pull/42");
+    expect(raw?.["status"]).toBe("pr_open");
+  });
+
   it("updates lastActivityAt when detection timestamp is newer", async () => {
     const newerTimestamp = new Date(Date.now() + 60_000); // 1 minute in the future
     const agentWithTimestamp: Agent = {
@@ -947,6 +1038,57 @@ describe("get", () => {
     expect(agentWithState.getActivityState).toHaveBeenCalled();
     // Verify activity state was set
     expect(session!.activity).toBe("idle");
+  });
+
+  it("auto-detects PR by branch for single-session fetch", async () => {
+    const mockSCM: SCM = {
+      name: "mock-scm",
+      detectPR: vi.fn().mockResolvedValue({
+        number: 77,
+        url: "https://github.com/org/my-app/pull/77",
+        title: "fix: restore PR detection",
+        owner: "org",
+        repo: "my-app",
+        branch: "feat/pr-detect",
+        baseBranch: "main",
+        isDraft: false,
+      }),
+      getPRState: vi.fn(),
+      mergePR: vi.fn(),
+      closePR: vi.fn(),
+      getCIChecks: vi.fn(),
+      getCISummary: vi.fn(),
+      getReviews: vi.fn(),
+      getReviewDecision: vi.fn(),
+      getPendingComments: vi.fn(),
+      getAutomatedComments: vi.fn(),
+      getMergeability: vi.fn(),
+    };
+    const registryWithScm: PluginRegistry = {
+      ...mockRegistry,
+      get: vi.fn().mockImplementation((slot: string) => {
+        if (slot === "runtime") return mockRuntime;
+        if (slot === "agent") return mockAgent;
+        if (slot === "scm") return mockSCM;
+        return null;
+      }),
+    };
+
+    writeMetadata(sessionsDir, "app-1", {
+      worktree: "/tmp",
+      branch: "feat/pr-detect",
+      status: "working",
+      project: "my-app",
+      runtimeHandle: JSON.stringify(makeHandle("rt-1")),
+    });
+
+    const sm = createSessionManager({ config, registry: registryWithScm });
+    const session = await sm.get("app-1");
+
+    expect(session).not.toBeNull();
+    expect(mockSCM.detectPR).toHaveBeenCalled();
+    expect(session!.pr?.url).toBe("https://github.com/org/my-app/pull/77");
+    expect(session!.status).toBe("pr_open");
   });
 
   it("returns null for nonexistent session", async () => {

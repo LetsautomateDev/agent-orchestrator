@@ -213,7 +213,10 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
   /** Resolve which plugins to use for a project. */
   function resolvePlugins(project: ProjectConfig, agentOverride?: string) {
     const runtime = registry.get<Runtime>("runtime", project.runtime ?? config.defaults.runtime);
-    const agent = registry.get<Agent>("agent", agentOverride ?? project.agent ?? config.defaults.agent);
+    const agent = registry.get<Agent>(
+      "agent",
+      agentOverride ?? project.agent ?? config.defaults.agent,
+    );
     const workspace = registry.get<Workspace>(
       "workspace",
       project.workspace ?? config.defaults.workspace,
@@ -224,6 +227,44 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     const scm = project.scm ? registry.get<SCM>("scm", project.scm.plugin) : null;
 
     return { runtime, agent, workspace, tracker, scm };
+  }
+
+  /** Promote working/spawning sessions to pr_open when a PR is detected. */
+  function shouldPromoteToPROpen(status: SessionStatus): boolean {
+    return status === "working" || status === "spawning";
+  }
+
+  /**
+   * Best-effort PR auto-detection for sessions that don't have metadata.pr yet.
+   * This enables dashboard PR mode even when agent hooks missed metadata updates.
+   */
+  async function detectAndAttachPR(
+    session: Session,
+    project: ProjectConfig,
+    sessionsDir: string,
+    plugins: ReturnType<typeof resolvePlugins>,
+  ): Promise<void> {
+    if (session.pr || !session.branch || !plugins.scm) return;
+
+    try {
+      const detected = await plugins.scm.detectPR(session, project);
+      if (!detected) return;
+
+      session.pr = detected;
+
+      const updates: Record<string, string> = { pr: detected.url };
+      session.metadata["pr"] = detected.url;
+
+      if (shouldPromoteToPROpen(session.status)) {
+        session.status = "pr_open";
+        updates["status"] = "pr_open";
+        session.metadata["status"] = "pr_open";
+      }
+
+      updateMetadata(sessionsDir, session.id, updates);
+    } catch {
+      // SCM detection failed — keep existing metadata and retry on next refresh
+    }
   }
 
   /**
@@ -251,9 +292,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
    * Enrich session with live runtime state (alive/exited) and activity detection.
    * Mutates the session object in place.
    */
-  const TERMINAL_SESSION_STATUSES = new Set([
-    "killed", "done", "merged", "terminated", "cleanup",
-  ]);
+  const TERMINAL_SESSION_STATUSES = new Set(["killed", "done", "merged", "terminated", "cleanup"]);
 
   async function enrichSessionWithRuntimeState(
     session: Session,
@@ -288,16 +327,48 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     // not a runtime handle. Gating on runtimeHandle caused sessions created by
     // external scripts (which don't store runtimeHandle) to always show "unknown".
     if (plugins.agent) {
+      let activityDetected = false;
+
       try {
         const detected = await plugins.agent.getActivityState(session, config.readyThresholdMs);
         if (detected !== null) {
           session.activity = detected.state;
+          activityDetected = true;
           if (detected.timestamp && detected.timestamp > session.lastActivityAt) {
             session.lastActivityAt = detected.timestamp;
           }
         }
       } catch {
         // Can't detect activity — keep existing value
+      }
+
+      // Fallback to terminal parsing when agent-native detection returns null.
+      // This reduces "unknown" activity states for agents with incomplete
+      // introspection support while preserving native detections when available.
+      if (!activityDetected && session.runtimeHandle && plugins.runtime) {
+        try {
+          const terminalOutput = await plugins.runtime.getOutput(session.runtimeHandle, 10);
+          if (terminalOutput) {
+            session.activity = plugins.agent.detectActivity(terminalOutput);
+            activityDetected = true;
+          }
+        } catch {
+          // Can't read terminal output — keep existing value
+        }
+
+        // If we still don't know activity, at least detect exited processes.
+        if (!activityDetected) {
+          try {
+            const processAlive = await plugins.agent.isProcessRunning(session.runtimeHandle);
+            if (!processAlive) {
+              session.status = "killed";
+              session.activity = "exited";
+              return;
+            }
+          } catch {
+            // Can't probe process liveness — keep existing value
+          }
+        }
       }
 
       // Enrich with live agent session info (summary, cost).
@@ -398,8 +469,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       // If the issueId is already branch-safe (e.g. "INT-9999"), use as-is.
       // Otherwise sanitize free-text (e.g. "fix login bug") into a valid slug.
       const id = spawnConfig.issueId;
-      const isBranchSafe =
-        /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(id) && !id.includes("..");
+      const isBranchSafe = /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(id) && !id.includes("..");
       const slug = isBranchSafe
         ? id
         : id
@@ -712,36 +782,50 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
   async function list(projectId?: string): Promise<Session[]> {
     const allSessions = listAllSessions(projectId);
 
-    const sessionPromises = allSessions.map(async ({ sessionName, projectId: sessionProjectId }) => {
-      const project = config.projects[sessionProjectId];
-      if (!project) return null;
+    const sessionPromises = allSessions.map(
+      async ({ sessionName, projectId: sessionProjectId }) => {
+        const project = config.projects[sessionProjectId];
+        if (!project) return null;
 
-      const sessionsDir = getProjectSessionsDir(project);
-      const raw = readMetadataRaw(sessionsDir, sessionName);
-      if (!raw) return null;
+        const sessionsDir = getProjectSessionsDir(project);
+        const raw = readMetadataRaw(sessionsDir, sessionName);
+        if (!raw) return null;
 
-      // Get file timestamps for createdAt/lastActivityAt
-      let createdAt: Date | undefined;
-      let modifiedAt: Date | undefined;
-      try {
-        const metaPath = join(sessionsDir, sessionName);
-        const stats = statSync(metaPath);
-        createdAt = stats.birthtime;
-        modifiedAt = stats.mtime;
-      } catch {
-        // If stat fails, timestamps will fall back to current time
-      }
+        // Get file timestamps for createdAt/lastActivityAt
+        let createdAt: Date | undefined;
+        let modifiedAt: Date | undefined;
+        try {
+          const metaPath = join(sessionsDir, sessionName);
+          const stats = statSync(metaPath);
+          createdAt = stats.birthtime;
+          modifiedAt = stats.mtime;
+        } catch {
+          // If stat fails, timestamps will fall back to current time
+        }
 
-      const session = metadataToSession(sessionName, raw, createdAt, modifiedAt);
+        const session = metadataToSession(sessionName, raw, createdAt, modifiedAt);
 
-      const plugins = resolvePlugins(project, raw["agent"]);
-      // Cap per-session enrichment at 2s — subprocess calls (tmux/ps) can be
-      // slow under load. If we time out, session keeps its metadata values.
-      const enrichTimeout = new Promise<void>((resolve) => setTimeout(resolve, 2_000));
-      await Promise.race([ensureHandleAndEnrich(session, sessionName, project, plugins), enrichTimeout]);
+        const plugins = resolvePlugins(project, raw["agent"]);
 
-      return session;
-    });
+        // Best-effort PR auto-detection before enrichment. This keeps dashboard
+        // PR state accurate even when metadata hooks were bypassed.
+        const detectPrTimeout = new Promise<void>((resolve) => setTimeout(resolve, 1_000));
+        await Promise.race([
+          detectAndAttachPR(session, project, sessionsDir, plugins),
+          detectPrTimeout,
+        ]);
+
+        // Cap per-session enrichment at 2s — subprocess calls (tmux/ps) can be
+        // slow under load. If we time out, session keeps its metadata values.
+        const enrichTimeout = new Promise<void>((resolve) => setTimeout(resolve, 2_000));
+        await Promise.race([
+          ensureHandleAndEnrich(session, sessionName, project, plugins),
+          enrichTimeout,
+        ]);
+
+        return session;
+      },
+    );
 
     const results = await Promise.all(sessionPromises);
     return results.filter((s): s is Session => s !== null);
@@ -769,6 +853,14 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       const session = metadataToSession(sessionId, raw, createdAt, modifiedAt);
 
       const plugins = resolvePlugins(project, raw["agent"]);
+
+      // Best-effort PR auto-detection for direct session fetches.
+      const detectPrTimeout = new Promise<void>((resolve) => setTimeout(resolve, 1_000));
+      await Promise.race([
+        detectAndAttachPR(session, project, sessionsDir, plugins),
+        detectPrTimeout,
+      ]);
+
       await ensureHandleAndEnrich(session, sessionId, project, plugins);
 
       return session;
@@ -849,10 +941,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
         // Never clean up orchestrator sessions — they manage the lifecycle.
         // Check explicit role metadata first, fall back to naming convention
         // for pre-existing sessions spawned before the role field was added.
-        if (
-          session.metadata["role"] === "orchestrator" ||
-          session.id.endsWith("-orchestrator")
-        ) {
+        if (session.metadata["role"] === "orchestrator" || session.id.endsWith("-orchestrator")) {
           result.skipped.push(session.id);
           continue;
         }

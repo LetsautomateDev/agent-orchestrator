@@ -23,7 +23,10 @@ import {
 
 // Static plugin imports — webpack needs these to be string literals
 import pluginRuntimeTmux from "@composio/ao-plugin-runtime-tmux";
+import pluginAgentAider from "@composio/ao-plugin-agent-aider";
 import pluginAgentClaudeCode from "@composio/ao-plugin-agent-claude-code";
+import pluginAgentCodex from "@composio/ao-plugin-agent-codex";
+import pluginAgentOpenCode from "@composio/ao-plugin-agent-opencode";
 import pluginWorkspaceWorktree from "@composio/ao-plugin-workspace-worktree";
 import pluginScmGithub from "@composio/ao-plugin-scm-github";
 import pluginTrackerGithub from "@composio/ao-plugin-tracker-github";
@@ -63,7 +66,10 @@ async function initServices(): Promise<Services> {
 
   // Register plugins explicitly (webpack can't handle dynamic import() in core)
   registry.register(pluginRuntimeTmux);
+  registry.register(pluginAgentAider);
   registry.register(pluginAgentClaudeCode);
+  registry.register(pluginAgentCodex);
+  registry.register(pluginAgentOpenCode);
   registry.register(pluginWorkspaceWorktree);
   registry.register(pluginScmGithub);
   registry.register(pluginTrackerGithub);
@@ -81,4 +87,3 @@ export function getSCM(registry: PluginRegistry, project: ProjectConfig | undefi
   if (!project?.scm) return null;
   return registry.get<SCM>("scm", project.scm.plugin);
 }
-
