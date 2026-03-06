@@ -15,8 +15,16 @@ import type { SessionManager } from "@composio/ao-core";
 // Hoisted mocks
 // ---------------------------------------------------------------------------
 
-const { mockExec, mockExecSilent, mockConfigRef, mockSessionManager, mockWaitForPortAndOpen, mockSpawn } =
-  vi.hoisted(() => ({
+const {
+  mockExec,
+  mockExecSilent,
+  mockConfigRef,
+  mockSessionManager,
+  mockWaitForPortAndOpen,
+  mockSpawn,
+  mockLifecycleStart,
+  mockLifecycleStop,
+} = vi.hoisted(() => ({
     mockExec: vi.fn(),
     mockExecSilent: vi.fn(),
     mockConfigRef: { current: null as Record<string, unknown> | null },
@@ -31,6 +39,8 @@ const { mockExec, mockExecSilent, mockConfigRef, mockSessionManager, mockWaitFor
     },
     mockWaitForPortAndOpen: vi.fn().mockResolvedValue(undefined),
     mockSpawn: vi.fn(),
+    mockLifecycleStart: vi.fn(),
+    mockLifecycleStop: vi.fn(),
   }),
 );
 
@@ -63,11 +73,18 @@ vi.mock("@composio/ao-core", async (importOriginal) => {
       if (path) return actual.loadConfig(path);
       return mockConfigRef.current;
     },
+    createLifecycleManager: vi.fn(() => ({
+      start: mockLifecycleStart,
+      stop: mockLifecycleStop,
+      getStates: vi.fn(),
+      check: vi.fn(),
+    })),
   };
 });
 
 vi.mock("../../src/lib/create-session-manager.js", () => ({
   getSessionManager: async (): Promise<SessionManager> => mockSessionManager as SessionManager,
+  getPluginRegistry: async () => ({}) as Record<string, unknown>,
 }));
 
 vi.mock("../../src/lib/web-dir.js", () => ({
@@ -141,6 +158,8 @@ beforeEach(() => {
   mockWaitForPortAndOpen.mockReset();
   mockWaitForPortAndOpen.mockResolvedValue(undefined);
   mockSpawn.mockClear();
+  mockLifecycleStart.mockReset();
+  mockLifecycleStop.mockReset();
 });
 
 afterEach(() => {

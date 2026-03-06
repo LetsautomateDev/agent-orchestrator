@@ -18,6 +18,9 @@ import type {
 
 const execFileAsync = promisify(execFile);
 
+const ISSUE_JSON_FIELDS = "number,title,body,url,state,stateReason,labels,assignees";
+const ISSUE_JSON_FIELDS_LEGACY = "number,title,body,url,state,labels,assignees";
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -33,6 +36,83 @@ async function gh(args: string[]): Promise<string> {
     throw new Error(`gh ${args.slice(0, 3).join(" ")} failed: ${(err as Error).message}`, {
       cause: err,
     });
+  }
+}
+
+function isUnsupportedStateReasonError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return message.includes('Unknown JSON field: "stateReason"');
+}
+
+interface GitHubIssueData {
+  number: number;
+  title: string;
+  body: string | null;
+  url: string;
+  state: string;
+  stateReason?: string | null;
+  labels: Array<{ name: string }>;
+  assignees: Array<{ login: string }>;
+}
+
+async function getIssueData(identifier: string, project: ProjectConfig): Promise<GitHubIssueData> {
+  const baseArgs = ["issue", "view", identifier, "--repo", project.repo, "--json"];
+
+  try {
+    const raw = await gh([...baseArgs, ISSUE_JSON_FIELDS]);
+    return JSON.parse(raw) as GitHubIssueData;
+  } catch (err) {
+    if (!isUnsupportedStateReasonError(err)) throw err;
+    const raw = await gh([...baseArgs, ISSUE_JSON_FIELDS_LEGACY]);
+    return JSON.parse(raw) as GitHubIssueData;
+  }
+}
+
+async function listIssueData(
+  filters: IssueFilters,
+  project: ProjectConfig,
+): Promise<GitHubIssueData[]> {
+  const baseArgs = [
+    "issue",
+    "list",
+    "--repo",
+    project.repo,
+    "--json",
+    ISSUE_JSON_FIELDS,
+    "--limit",
+    String(filters.limit ?? 30),
+  ];
+
+  const buildArgs = (jsonFields: string): string[] => {
+    const args = [...baseArgs];
+    args[5] = jsonFields;
+
+    if (filters.state === "closed") {
+      args.push("--state", "closed");
+    } else if (filters.state === "all") {
+      args.push("--state", "all");
+    } else {
+      args.push("--state", "open");
+    }
+
+    if (filters.labels && filters.labels.length > 0) {
+      args.push("--label", filters.labels.join(","));
+    }
+
+    if (filters.assignee) {
+      args.push("--assignee", filters.assignee);
+    }
+
+    return args;
+  };
+
+  try {
+    const raw = await gh(buildArgs(ISSUE_JSON_FIELDS));
+    return JSON.parse(raw) as GitHubIssueData[];
+  } catch (err) {
+    if (!isUnsupportedStateReasonError(err)) throw err;
+    const raw = await gh(buildArgs(ISSUE_JSON_FIELDS_LEGACY));
+    return JSON.parse(raw) as GitHubIssueData[];
   }
 }
 
@@ -54,26 +134,7 @@ function createGitHubTracker(): Tracker {
     name: "github",
 
     async getIssue(identifier: string, project: ProjectConfig): Promise<Issue> {
-      const raw = await gh([
-        "issue",
-        "view",
-        identifier,
-        "--repo",
-        project.repo,
-        "--json",
-        "number,title,body,url,state,stateReason,labels,assignees",
-      ]);
-
-      const data: {
-        number: number;
-        title: string;
-        body: string;
-        url: string;
-        state: string;
-        stateReason: string | null;
-        labels: Array<{ name: string }>;
-        assignees: Array<{ login: string }>;
-      } = JSON.parse(raw);
+      const data = await getIssueData(identifier, project);
 
       return {
         id: String(data.number),
@@ -148,44 +209,7 @@ function createGitHubTracker(): Tracker {
     },
 
     async listIssues(filters: IssueFilters, project: ProjectConfig): Promise<Issue[]> {
-      const args = [
-        "issue",
-        "list",
-        "--repo",
-        project.repo,
-        "--json",
-        "number,title,body,url,state,stateReason,labels,assignees",
-        "--limit",
-        String(filters.limit ?? 30),
-      ];
-
-      if (filters.state === "closed") {
-        args.push("--state", "closed");
-      } else if (filters.state === "all") {
-        args.push("--state", "all");
-      } else {
-        args.push("--state", "open");
-      }
-
-      if (filters.labels && filters.labels.length > 0) {
-        args.push("--label", filters.labels.join(","));
-      }
-
-      if (filters.assignee) {
-        args.push("--assignee", filters.assignee);
-      }
-
-      const raw = await gh(args);
-      const issues: Array<{
-        number: number;
-        title: string;
-        body: string;
-        url: string;
-        state: string;
-        stateReason: string | null;
-        labels: Array<{ name: string }>;
-        assignees: Array<{ login: string }>;
-      }> = JSON.parse(raw);
+      const issues = await listIssueData(filters, project);
 
       return issues.map((data) => ({
         id: String(data.number),

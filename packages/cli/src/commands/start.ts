@@ -16,6 +16,7 @@ import chalk from "chalk";
 import ora from "ora";
 import type { Command } from "commander";
 import {
+  createLifecycleManager,
   loadConfig,
   generateOrchestratorPrompt,
   isRepoUrl,
@@ -29,7 +30,7 @@ import {
   type ParsedRepoUrl,
 } from "@composio/ao-core";
 import { exec, execSilent } from "../lib/shell.js";
-import { getSessionManager } from "../lib/create-session-manager.js";
+import { getPluginRegistry, getSessionManager } from "../lib/create-session-manager.js";
 import { findWebDir, buildDashboardEnv, waitForPortAndOpen, isPortAvailable, findFreePort, MAX_PORT_SCAN } from "../lib/web-dir.js";
 import { cleanNextCache } from "../lib/dashboard-rebuild.js";
 import { preflight } from "../lib/preflight.js";
@@ -255,6 +256,7 @@ async function runStartup(
 
   const spinner = ora();
   let dashboardProcess: ChildProcess | null = null;
+  let lifecycleStop: (() => void) | null = null;
   let exists = false;
 
   // Start dashboard (unless --no-dashboard)
@@ -334,6 +336,14 @@ async function runStartup(
     }
   }
 
+  if (opts?.dashboard !== false || opts?.orchestrator !== false) {
+    const registry = await getPluginRegistry(config);
+    const sm = await getSessionManager(config);
+    const lifecycle = createLifecycleManager({ config, registry, sessionManager: sm });
+    lifecycle.start();
+    lifecycleStop = () => lifecycle.stop();
+  }
+
   // Print summary
   console.log(chalk.bold.green("\n✓ Startup complete\n"));
 
@@ -363,6 +373,7 @@ async function runStartup(
   if (dashboardProcess) {
     dashboardProcess.on("exit", (code) => {
       if (openAbort) openAbort.abort();
+      if (lifecycleStop) lifecycleStop();
       if (code !== 0 && code !== null) {
         console.error(chalk.red(`Dashboard exited with code ${code}`));
       }

@@ -32,10 +32,42 @@ function assertValidSessionId(id: string): void {
   }
 }
 
+function shellEscape(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
 /** Run a tmux command and return stdout */
 async function tmux(...args: string[]): Promise<string> {
   const { stdout } = await execFileAsync("tmux", args);
   return stdout.trimEnd();
+}
+
+function looksLikeCodexPane(output: string): boolean {
+  const tail = output.split("\n").slice(-40).join("\n");
+  return /OpenAI Codex/i.test(tail) || (/\bgpt-[\w.-]+\b/.test(tail) && /(?:^|\n)\s*›/.test(tail));
+}
+
+function hasUnsubmittedPasteMarker(output: string): boolean {
+  return /\[Pasted Content \d+ chars\]/i.test(output);
+}
+
+async function sendCodexLiteralMessage(sessionId: string, message: string): Promise<void> {
+  const chunkSize = 120;
+  const lines = message.split("\n");
+
+  for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
+    const line = lines[lineIndex] ?? "";
+
+    for (let offset = 0; offset < line.length; offset += chunkSize) {
+      await tmux("send-keys", "-t", sessionId, "-l", line.slice(offset, offset + chunkSize));
+      await sleep(25);
+    }
+
+    if (lineIndex < lines.length - 1) {
+      await tmux("send-keys", "-t", sessionId, "C-j");
+      await sleep(40);
+    }
+  }
 }
 
 export function create(): Runtime {
@@ -54,31 +86,37 @@ export function create(): Runtime {
 
       // Create tmux session in detached mode
       await tmux("new-session", "-d", "-s", sessionName, "-c", config.workspacePath, ...envArgs);
+      // Give the interactive shell time to finish startup hooks before we type
+      // into it. Without this, early send-keys can get mangled on fresh panes.
+      await sleep(1000);
 
       // Send the launch command — clean up the session if this fails.
-      // Use load-buffer + paste-buffer for long commands to avoid tmux/zsh
-      // truncation issues (commands >200 chars get mangled by send-keys).
+      // For long commands, write a temp script and launch that with a short
+      // shell command instead of pasting thousands of chars into the shell.
+      let sendCommand = config.launchCommand;
+      let launchScriptPath: string | null = null;
+      if (config.launchCommand.length > 200) {
+        launchScriptPath = join(tmpdir(), `ao-launch-${randomUUID()}.sh`);
+        const launchScript = `#!/usr/bin/env bash
+rm -- "$0"
+${config.launchCommand}
+`;
+        writeFileSync(launchScriptPath, launchScript, { encoding: "utf-8", mode: 0o700 });
+        sendCommand = `bash ${shellEscape(launchScriptPath)}`;
+      }
+
       try {
-        if (config.launchCommand.length > 200) {
-          const bufferName = `ao-launch-${randomUUID().slice(0, 8)}`;
-          const tmpPath = join(tmpdir(), `ao-launch-${randomUUID()}.txt`);
-          writeFileSync(tmpPath, config.launchCommand, { encoding: "utf-8", mode: 0o600 });
-          try {
-            await tmux("load-buffer", "-b", bufferName, tmpPath);
-            await tmux("paste-buffer", "-b", bufferName, "-t", sessionName, "-d");
-          } finally {
-            try {
-              unlinkSync(tmpPath);
-            } catch {
-              /* ignore cleanup errors */
-            }
-          }
-          await sleep(300);
-          await tmux("send-keys", "-t", sessionName, "Enter");
-        } else {
-          await tmux("send-keys", "-t", sessionName, config.launchCommand, "Enter");
-        }
+        await tmux("send-keys", "-t", sessionName, "-l", sendCommand);
+        await sleep(launchScriptPath ? 150 : 0);
+        await tmux("send-keys", "-t", sessionName, "Enter");
       } catch (err: unknown) {
+        if (launchScriptPath) {
+          try {
+            unlinkSync(launchScriptPath);
+          } catch {
+            /* ignore cleanup errors */
+          }
+        }
         try {
           await tmux("kill-session", "-t", sessionName);
         } catch {
@@ -109,12 +147,31 @@ export function create(): Runtime {
     },
 
     async sendMessage(handle: RuntimeHandle, message: string): Promise<void> {
-      // Clear any partial input
-      await tmux("send-keys", "-t", handle.id, "C-u");
+      const usesPasteBuffer = message.includes("\n") || message.length > 200;
+      let isCodex = false;
+
+      try {
+        const tail = await tmux("capture-pane", "-t", handle.id, "-p", "-S", "-60");
+        isCodex = looksLikeCodexPane(tail);
+      } catch {
+        // Best-effort detection only.
+      }
+
+      if (isCodex) {
+        await sendCodexLiteralMessage(handle.id, message);
+        await sleep(200);
+        await tmux("send-keys", "-t", handle.id, "Enter");
+        return;
+      }
+
+      // Clear any partial input/copy-mode first. Some TUIs can swallow Enter
+      // when the pane is not in normal compose mode.
+      await tmux("send-keys", "-t", handle.id, "Escape");
+      await sleep(100);
 
       // For long or multiline messages, use load-buffer + paste-buffer
       // Use randomUUID to avoid temp file collisions on concurrent sends
-      if (message.includes("\n") || message.length > 200) {
+      if (usesPasteBuffer) {
         const bufferName = `ao-${randomUUID()}`;
         const tmpPath = join(tmpdir(), `ao-send-${randomUUID()}.txt`);
         writeFileSync(tmpPath, message, { encoding: "utf-8", mode: 0o600 });
@@ -141,10 +198,25 @@ export function create(): Runtime {
         await tmux("send-keys", "-t", handle.id, "-l", message);
       }
 
-      // Small delay to let tmux process the pasted text before pressing Enter.
-      // Without this, Enter can arrive before the text is fully rendered.
-      await sleep(300);
+      // Let tmux (and the TUI app) finish processing pasted text before Enter.
+      // Paste-buffer can lag behind key events on busy panes; use a longer delay
+      // for multiline/long messages to avoid leaving text in the composer unsent.
+      await sleep(usesPasteBuffer ? 1200 : 300);
       await tmux("send-keys", "-t", handle.id, "Enter");
+
+      // Codex can occasionally keep large pasted content in the composer without
+      // submitting on the first Enter. Detect the marker and retry with C-m.
+      if (usesPasteBuffer) {
+        await sleep(350);
+        try {
+          const tail = await tmux("capture-pane", "-t", handle.id, "-p", "-S", "-40");
+          if (hasUnsubmittedPasteMarker(tail)) {
+            await tmux("send-keys", "-t", handle.id, "C-m");
+          }
+        } catch {
+          // Best-effort fallback only — ignore capture errors
+        }
+      }
     },
 
     async getOutput(handle: RuntimeHandle, lines = 50): Promise<string> {

@@ -124,6 +124,18 @@ describe("tracker-github plugin", () => {
       await expect(tracker.getIssue("999", project)).rejects.toThrow("issue not found");
     });
 
+    it("retries without stateReason for older gh versions", async () => {
+      mockGhError('Unknown JSON field: "stateReason"');
+      mockGh({ ...sampleIssue, stateReason: undefined });
+
+      const issue = await tracker.getIssue("123", project);
+
+      expect(issue.id).toBe("123");
+      expect(ghMock).toHaveBeenCalledTimes(2);
+      expect((ghMock.mock.calls[0]?.[1] as string[]).join(",")).toContain("stateReason");
+      expect((ghMock.mock.calls[1]?.[1] as string[]).join(",")).not.toContain("stateReason");
+    });
+
     it("throws on malformed JSON response", async () => {
       ghMock.mockResolvedValueOnce({ stdout: "not json{" });
       await expect(tracker.getIssue("123", project)).rejects.toThrow();
@@ -278,6 +290,18 @@ describe("tracker-github plugin", () => {
         expect.arrayContaining(["--limit", "5"]),
         expect.any(Object),
       );
+    });
+
+    it("falls back when gh list does not support stateReason field", async () => {
+      mockGhError('Unknown JSON field: "stateReason"');
+      mockGh([{ ...sampleIssue, stateReason: undefined }]);
+
+      const issues = await tracker.listIssues!({}, project);
+
+      expect(issues).toHaveLength(1);
+      expect(ghMock).toHaveBeenCalledTimes(2);
+      expect((ghMock.mock.calls[0]?.[1] as string[]).join(",")).toContain("stateReason");
+      expect((ghMock.mock.calls[1]?.[1] as string[]).join(",")).not.toContain("stateReason");
     });
   });
 

@@ -135,6 +135,8 @@ function eventToReactionKey(eventType: EventType): string | null {
   switch (eventType) {
     case "ci.failing":
       return "ci-failed";
+    case "review.pending":
+      return "changes-requested";
     case "review.changes_requested":
       return "changes-requested";
     case "automated_review.found":
@@ -267,6 +269,8 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
         // Check reviews
         const reviewDecision = await scm.getReviewDecision(session.pr);
         if (reviewDecision === "changes_requested") return "changes_requested";
+        const pendingComments = await scm.getPendingComments(session.pr);
+        if (Array.isArray(pendingComments) && pendingComments.length > 0) return "review_pending";
         if (reviewDecision === "approved") {
           // Check merge readiness
           const mergeReady = await scm.getMergeability(session.pr);
@@ -521,6 +525,41 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
     } else {
       // No transition but track current state
       states.set(session.id, newStatus);
+    }
+
+    // Separate from status transitions: bot review comments should be able to
+    // wake the agent even when GitHub doesn't emit CHANGES_REQUESTED or when
+    // unresolved-thread GraphQL is temporarily rate-limited.
+    const project = config.projects[session.projectId];
+    const scm = project?.scm ? registry.get<SCM>("scm", project.scm.plugin) : null;
+    if (project && session.pr && scm) {
+      try {
+        const automatedComments = await scm.getAutomatedComments(session.pr);
+        if (automatedComments.length > 0) {
+          const reactionKey = eventToReactionKey("automated_review.found");
+          const trackerKey = reactionKey ? `${session.id}:${reactionKey}` : null;
+          if (reactionKey && trackerKey && !reactionTrackers.has(trackerKey)) {
+            const globalReaction = config.reactions[reactionKey];
+            const projectReaction = project.reactions?.[reactionKey];
+            const reactionConfig = projectReaction
+              ? { ...globalReaction, ...projectReaction }
+              : globalReaction;
+
+            if (reactionConfig && reactionConfig.action) {
+              if (reactionConfig.auto !== false || reactionConfig.action === "notify") {
+                await executeReaction(
+                  session.id,
+                  session.projectId,
+                  reactionKey,
+                  reactionConfig as ReactionConfig,
+                );
+              }
+            }
+          }
+        }
+      } catch {
+        // Best-effort only — rate limits or SCM failures should not break polling.
+      }
     }
   }
 

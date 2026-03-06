@@ -30,6 +30,7 @@ const execFileAsync = promisify(execFile);
 const BOT_AUTHORS = new Set([
   "cursor[bot]",
   "github-actions[bot]",
+  "greptile-apps",
   "codecov[bot]",
   "sonarcloud[bot]",
   "dependabot[bot]",
@@ -58,6 +59,20 @@ async function gh(args: string[]): Promise<string> {
   }
 }
 
+async function getLiveBranch(workspacePath: string | null): Promise<string | null> {
+  if (!workspacePath) return null;
+  try {
+    const { stdout } = await execFileAsync("git", ["branch", "--show-current"], {
+      cwd: workspacePath,
+      timeout: 30_000,
+    });
+    const branch = stdout.trim();
+    return branch || null;
+  } catch {
+    return null;
+  }
+}
+
 function repoFlag(pr: PRInfo): string {
   return `${pr.owner}/${pr.repo}`;
 }
@@ -66,6 +81,114 @@ function parseDate(val: string | undefined | null): Date {
   if (!val) return new Date(0);
   const d = new Date(val);
   return isNaN(d.getTime()) ? new Date(0) : d;
+}
+
+type StatusCheckRollupItem =
+  | {
+      __typename: "CheckRun";
+      name?: string;
+      status?: string;
+      conclusion?: string;
+      detailsUrl?: string;
+      startedAt?: string;
+      completedAt?: string;
+    }
+  | {
+      __typename: "StatusContext";
+      context?: string;
+      state?: string;
+      targetUrl?: string;
+      startedAt?: string;
+    };
+
+function mapCheckRunStatus(status: string | undefined, conclusion: string | undefined): CICheck["status"] {
+  const normalizedStatus = status?.toUpperCase();
+  const normalizedConclusion = conclusion?.toUpperCase();
+
+  if (
+    normalizedStatus === "QUEUED" ||
+    normalizedStatus === "PENDING" ||
+    normalizedStatus === "REQUESTED" ||
+    normalizedStatus === "WAITING"
+  ) {
+    return "pending";
+  }
+  if (normalizedStatus === "IN_PROGRESS") return "running";
+
+  if (normalizedConclusion === "SUCCESS") return "passed";
+  if (normalizedConclusion === "SKIPPED" || normalizedConclusion === "NEUTRAL") return "skipped";
+  if (
+    normalizedConclusion === "FAILURE" ||
+    normalizedConclusion === "TIMED_OUT" ||
+    normalizedConclusion === "CANCELLED" ||
+    normalizedConclusion === "ACTION_REQUIRED" ||
+    normalizedConclusion === "STALE" ||
+    normalizedConclusion === "STARTUP_FAILURE"
+  ) {
+    return "failed";
+  }
+
+  return normalizedStatus === "COMPLETED" ? "failed" : "pending";
+}
+
+function mapStatusContextState(state: string | undefined): CICheck["status"] {
+  const normalizedState = state?.toUpperCase();
+  if (normalizedState === "SUCCESS") return "passed";
+  if (normalizedState === "PENDING" || normalizedState === "EXPECTED") return "pending";
+  if (normalizedState === "FAILURE" || normalizedState === "ERROR") return "failed";
+  return "failed";
+}
+
+function mapStatusCheckRollup(items: StatusCheckRollupItem[]): CICheck[] {
+  return items.flatMap((item) => {
+    if (item.__typename === "CheckRun") {
+      const name = item.name?.trim();
+      if (!name) return [];
+      const status = mapCheckRunStatus(item.status, item.conclusion);
+      const conclusion = item.conclusion?.toUpperCase() || item.status?.toUpperCase() || undefined;
+      return [
+        {
+          name,
+          status,
+          url: item.detailsUrl || undefined,
+          conclusion,
+          startedAt: item.startedAt ? new Date(item.startedAt) : undefined,
+          completedAt: item.completedAt ? new Date(item.completedAt) : undefined,
+        },
+      ];
+    }
+
+    const name = item.context?.trim();
+    if (!name) return [];
+    const status = mapStatusContextState(item.state);
+    return [
+      {
+        name,
+        status,
+        url: item.targetUrl || undefined,
+        conclusion: item.state?.toUpperCase() || undefined,
+        startedAt: item.startedAt ? new Date(item.startedAt) : undefined,
+        completedAt: undefined,
+      },
+    ];
+  });
+}
+
+function pickBestPR<T extends { state?: string; updatedAt?: string; createdAt?: string }>(
+  prs: T[],
+): T | null {
+  if (prs.length === 0) return null;
+
+  return [...prs].sort((a, b) => {
+    const aOpen = (a.state ?? "").toUpperCase() === "OPEN" ? 1 : 0;
+    const bOpen = (b.state ?? "").toUpperCase() === "OPEN" ? 1 : 0;
+    if (aOpen !== bOpen) return bOpen - aOpen;
+
+    const updatedDiff = parseDate(b.updatedAt).getTime() - parseDate(a.updatedAt).getTime();
+    if (updatedDiff !== 0) return updatedDiff;
+
+    return parseDate(b.createdAt).getTime() - parseDate(a.createdAt).getTime();
+  })[0] ?? null;
 }
 
 // ---------------------------------------------------------------------------
@@ -84,18 +207,69 @@ function createGitHubSCM(): SCM {
         throw new Error(`Invalid repo format "${project.repo}", expected "owner/repo"`);
       }
       const [owner, repo] = parts;
+
       try {
+        const branchCandidates = [session.branch];
+
+        for (const branch of branchCandidates) {
+          const raw = await gh([
+            "pr",
+            "list",
+            "--repo",
+            project.repo,
+            "--search",
+            `head:${branch}`,
+            "--state",
+            "all",
+            "--json",
+            "number,url,title,headRefName,baseRefName,isDraft,state,createdAt,updatedAt",
+            "--limit",
+            "20",
+          ]);
+
+          const prs: Array<{
+            number: number;
+            url: string;
+            title: string;
+            headRefName: string;
+            baseRefName: string;
+            isDraft: boolean;
+            state: string;
+            createdAt: string;
+            updatedAt: string;
+          }> = JSON.parse(raw);
+
+          const pr = pickBestPR(prs);
+          if (!pr) continue;
+
+          return {
+            number: pr.number,
+            url: pr.url,
+            title: pr.title,
+            owner,
+            repo,
+            branch: pr.headRefName,
+            baseBranch: pr.baseRefName,
+            isDraft: pr.isDraft,
+          };
+        }
+
+        const liveBranch = await getLiveBranch(session.workspacePath);
+        if (!liveBranch || branchCandidates.includes(liveBranch)) return null;
+
         const raw = await gh([
           "pr",
           "list",
           "--repo",
           project.repo,
-          "--head",
-          session.branch,
+          "--search",
+          `head:${liveBranch}`,
+          "--state",
+          "all",
           "--json",
-          "number,url,title,headRefName,baseRefName,isDraft",
+          "number,url,title,headRefName,baseRefName,isDraft,state,createdAt,updatedAt",
           "--limit",
-          "1",
+          "20",
         ]);
 
         const prs: Array<{
@@ -105,11 +279,14 @@ function createGitHubSCM(): SCM {
           headRefName: string;
           baseRefName: string;
           isDraft: boolean;
+          state: string;
+          createdAt: string;
+          updatedAt: string;
         }> = JSON.parse(raw);
 
-        if (prs.length === 0) return null;
+        const pr = pickBestPR(prs);
+        if (!pr) return null;
 
-        const pr = prs[0];
         return {
           number: pr.number,
           url: pr.url,
@@ -120,6 +297,8 @@ function createGitHubSCM(): SCM {
           baseBranch: pr.baseRefName,
           isDraft: pr.isDraft,
         };
+
+        return null;
       } catch {
         return null;
       }
@@ -182,56 +361,16 @@ function createGitHubSCM(): SCM {
       try {
         const raw = await gh([
           "pr",
-          "checks",
+          "view",
           String(pr.number),
           "--repo",
           repoFlag(pr),
           "--json",
-          "name,state,link,startedAt,completedAt",
+          "statusCheckRollup",
         ]);
 
-        const checks: Array<{
-          name: string;
-          state: string;
-          link: string;
-          startedAt: string;
-          completedAt: string;
-        }> = JSON.parse(raw);
-
-        return checks.map((c) => {
-          let status: CICheck["status"];
-          const state = c.state?.toUpperCase();
-
-          // gh pr checks returns state directly: SUCCESS, FAILURE, PENDING, QUEUED, etc.
-          if (state === "PENDING" || state === "QUEUED") {
-            status = "pending";
-          } else if (state === "IN_PROGRESS") {
-            status = "running";
-          } else if (state === "SUCCESS") {
-            status = "passed";
-          } else if (
-            state === "FAILURE" ||
-            state === "TIMED_OUT" ||
-            state === "CANCELLED" ||
-            state === "ACTION_REQUIRED"
-          ) {
-            status = "failed";
-          } else if (state === "SKIPPED" || state === "NEUTRAL") {
-            status = "skipped";
-          } else {
-            // Unknown state on a check — fail closed for safety
-            status = "failed";
-          }
-
-          return {
-            name: c.name,
-            status,
-            url: c.link || undefined,
-            conclusion: state || undefined, // Store original state for debugging
-            startedAt: c.startedAt ? new Date(c.startedAt) : undefined,
-            completedAt: c.completedAt ? new Date(c.completedAt) : undefined,
-          };
-        });
+        const data: { statusCheckRollup?: StatusCheckRollupItem[] | null } = JSON.parse(raw);
+        return mapStatusCheckRollup(data.statusCheckRollup ?? []);
       } catch (err) {
         // Propagate so callers (getCISummary) can decide how to handle.
         // Do NOT silently return [] — that causes a fail-open where CI

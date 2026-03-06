@@ -195,6 +195,7 @@ describe("plugin manifest & exports", () => {
     const agent = create();
     expect(agent.name).toBe("codex");
     expect(agent.processName).toBe("codex");
+    expect(agent.promptDelivery).toBe("inline");
   });
 
   it("default export is a valid PluginModule", () => {
@@ -210,7 +211,7 @@ describe("getLaunchCommand", () => {
   const agent = create();
 
   it("generates base command", () => {
-    expect(agent.getLaunchCommand(makeLaunchConfig())).toBe("'codex'");
+    expect(agent.getLaunchCommand(makeLaunchConfig())).toBe("'codex' -c disable_paste_burst=true");
   });
 
   it("includes --dangerously-bypass-approvals-and-sandbox when permissions=skip", () => {
@@ -246,29 +247,30 @@ describe("getLaunchCommand", () => {
     expect(cmd).toContain("--model 'gpt-4o'");
   });
 
-  it("appends shell-escaped prompt with -- separator", () => {
+  it("appends prompt inline for initial Codex turn", () => {
     const cmd = agent.getLaunchCommand(makeLaunchConfig({ prompt: "Fix it" }));
-    expect(cmd).toContain("-- 'Fix it'");
+    expect(cmd).toContain("'Fix it'");
   });
 
   it("combines all options", () => {
     const cmd = agent.getLaunchCommand(
       makeLaunchConfig({ permissions: "skip", model: "o3", prompt: "Go" }),
     );
-    expect(cmd).toBe("'codex' --dangerously-bypass-approvals-and-sandbox --model 'o3' -c model_reasoning_effort=high -- 'Go'");
+    expect(cmd).toBe(
+      "'codex' --dangerously-bypass-approvals-and-sandbox --model 'o3' -c model_reasoning_effort=high -c disable_paste_burst=true 'Go'",
+    );
   });
 
-  it("escapes single quotes in prompt (POSIX shell escaping)", () => {
+  it("ignores prompt quoting in launch command", () => {
     const cmd = agent.getLaunchCommand(makeLaunchConfig({ prompt: "it's broken" }));
-    expect(cmd).toContain("-- 'it'\\''s broken'");
+    expect(cmd).toBe("'codex' -c disable_paste_burst=true 'it'\\''s broken'");
   });
 
-  it("escapes dangerous characters in prompt", () => {
+  it("does not include dangerous prompt characters in launch command", () => {
     const cmd = agent.getLaunchCommand(
       makeLaunchConfig({ prompt: "$(rm -rf /); `evil`; $HOME" }),
     );
-    // Single-quoted strings prevent shell expansion
-    expect(cmd).toContain("-- '$(rm -rf /); `evil`; $HOME'");
+    expect(cmd).toBe("'codex' -c disable_paste_burst=true '$(rm -rf /); `evil`; $HOME'");
   });
 
   it("includes -c model_instructions_file when systemPromptFile is set", () => {
@@ -294,7 +296,7 @@ describe("getLaunchCommand", () => {
     expect(cmd).not.toContain("--dangerously-bypass-approvals-and-sandbox");
     expect(cmd).not.toContain("--ask-for-approval");
     expect(cmd).not.toContain("--model");
-    expect(cmd).not.toContain("-c");
+    expect(cmd).toContain("-c disable_paste_burst=true");
     expect(cmd).not.toContain("model_reasoning_effort");
   });
 
@@ -1213,13 +1215,15 @@ describe("postLaunchSetup", () => {
     mockReadFile.mockRejectedValue(new Error("ENOENT"));
 
     // Before postLaunchSetup, binary is "codex"
-    expect(agent.getLaunchCommand(makeLaunchConfig())).toBe("'codex'");
+    expect(agent.getLaunchCommand(makeLaunchConfig())).toBe("'codex' -c disable_paste_burst=true");
 
     // After postLaunchSetup resolves the binary
     await agent.postLaunchSetup!(makeSession({ workspacePath: "/workspace/test" }));
 
     // Now getLaunchCommand should use the resolved binary
-    expect(agent.getLaunchCommand(makeLaunchConfig())).toBe("'/opt/bin/codex'");
+    expect(agent.getLaunchCommand(makeLaunchConfig())).toBe(
+      "'/opt/bin/codex' -c disable_paste_burst=true",
+    );
   });
 });
 

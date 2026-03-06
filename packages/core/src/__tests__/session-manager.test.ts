@@ -546,7 +546,6 @@ describe("spawn", () => {
   });
 
   it("sends prompt post-launch when agent.promptDelivery is 'post-launch'", async () => {
-    vi.useFakeTimers();
     const postLaunchAgent = {
       ...mockAgent,
       promptDelivery: "post-launch" as const,
@@ -562,16 +561,13 @@ describe("spawn", () => {
     };
 
     const sm = createSessionManager({ config, registry: registryWithPostLaunch });
-    const spawnPromise = sm.spawn({ projectId: "my-app", prompt: "Fix the bug" });
-    await vi.advanceTimersByTimeAsync(5_000);
-    await spawnPromise;
+    await sm.spawn({ projectId: "my-app", prompt: "Fix the bug" });
 
     // Prompt should be sent via runtime.sendMessage, not included in launch command
     expect(mockRuntime.sendMessage).toHaveBeenCalledWith(
       expect.objectContaining({ id: expect.any(String) }),
       expect.stringContaining("Fix the bug"),
     );
-    vi.useRealTimers();
   });
 
   it("does not send prompt post-launch when agent.promptDelivery is not set", async () => {
@@ -583,7 +579,6 @@ describe("spawn", () => {
   });
 
   it("does not send prompt post-launch when no prompt is provided", async () => {
-    vi.useFakeTimers();
     const postLaunchAgent = {
       ...mockAgent,
       promptDelivery: "post-launch" as const,
@@ -599,16 +594,12 @@ describe("spawn", () => {
     };
 
     const sm = createSessionManager({ config, registry: registryWithPostLaunch });
-    const spawnPromise = sm.spawn({ projectId: "my-app" }); // No prompt
-    await vi.advanceTimersByTimeAsync(5_000);
-    await spawnPromise;
+    await sm.spawn({ projectId: "my-app" }); // No prompt
 
     expect(mockRuntime.sendMessage).not.toHaveBeenCalled();
-    vi.useRealTimers();
   });
 
   it("does not destroy session when post-launch prompt delivery fails", async () => {
-    vi.useFakeTimers();
     const failingRuntime: Runtime = {
       ...mockRuntime,
       sendMessage: vi.fn().mockRejectedValue(new Error("tmux send failed")),
@@ -628,23 +619,25 @@ describe("spawn", () => {
     };
 
     const sm = createSessionManager({ config, registry: registryWithFailingSend });
-    const spawnPromise = sm.spawn({ projectId: "my-app", prompt: "Fix the bug" });
-    await vi.advanceTimersByTimeAsync(5_000);
-    const session = await spawnPromise;
+    const session = await sm.spawn({ projectId: "my-app", prompt: "Fix the bug" });
 
     // Session should still be returned successfully despite sendMessage failure
     expect(session.id).toBe("app-1");
     expect(session.status).toBe("spawning");
     // Runtime should NOT have been destroyed
     expect(failingRuntime.destroy).not.toHaveBeenCalled();
-    vi.useRealTimers();
   });
 
-  it("waits before sending post-launch prompt", async () => {
+  it("waits until agent process is running before sending post-launch prompt", async () => {
     vi.useFakeTimers();
     const postLaunchAgent = {
       ...mockAgent,
       promptDelivery: "post-launch" as const,
+      isProcessRunning: vi
+        .fn()
+        .mockResolvedValueOnce(false)
+        .mockResolvedValueOnce(false)
+        .mockResolvedValue(true),
     };
     const registryWithPostLaunch: PluginRegistry = {
       ...mockRegistry,
@@ -659,14 +652,15 @@ describe("spawn", () => {
     const sm = createSessionManager({ config, registry: registryWithPostLaunch });
     const spawnPromise = sm.spawn({ projectId: "my-app", prompt: "Fix the bug" });
 
-    // Advance only 4s — not enough, message should not have been sent yet
-    await vi.advanceTimersByTimeAsync(4_000);
+    // Process probe still returns false
+    await vi.advanceTimersByTimeAsync(500);
     expect(mockRuntime.sendMessage).not.toHaveBeenCalled();
 
-    // Advance the remaining 1s — now it should fire
-    await vi.advanceTimersByTimeAsync(1_000);
-    await spawnPromise;
+    // Next poll still false
+    await vi.advanceTimersByTimeAsync(500);
+    // Third probe returns true on this tick — prompt should be delivered
     expect(mockRuntime.sendMessage).toHaveBeenCalled();
+    await spawnPromise;
     vi.useRealTimers();
   });
 });
@@ -920,6 +914,114 @@ describe("list", () => {
 
     const raw = readMetadataRaw(sessionsDir, "app-1");
     expect(raw?.["pr"]).toBe("https://github.com/org/my-app/pull/42");
+    expect(raw?.["status"]).toBe("pr_open");
+  });
+
+  it("updates metadata branch when detected PR head differs from stored branch", async () => {
+    const mockSCM: SCM = {
+      name: "mock-scm",
+      detectPR: vi.fn().mockResolvedValue({
+        number: 137,
+        url: "https://github.com/org/my-app/pull/137",
+        title: "feat: add health endpoint",
+        owner: "org",
+        repo: "my-app",
+        branch: "feat/110",
+        baseBranch: "main",
+        isDraft: false,
+      }),
+      getPRState: vi.fn(),
+      mergePR: vi.fn(),
+      closePR: vi.fn(),
+      getCIChecks: vi.fn(),
+      getCISummary: vi.fn(),
+      getReviews: vi.fn(),
+      getReviewDecision: vi.fn(),
+      getPendingComments: vi.fn(),
+      getAutomatedComments: vi.fn(),
+      getMergeability: vi.fn(),
+    };
+
+    const registryWithScm: PluginRegistry = {
+      ...mockRegistry,
+      get: vi.fn().mockImplementation((slot: string) => {
+        if (slot === "runtime") return mockRuntime;
+        if (slot === "agent") return mockAgent;
+        if (slot === "scm") return mockSCM;
+        return null;
+      }),
+    };
+
+    writeMetadata(sessionsDir, "app-1", {
+      worktree: "/tmp",
+      branch: "feat/issue-110",
+      status: "working",
+      project: "my-app",
+      runtimeHandle: JSON.stringify(makeHandle("rt-1")),
+    });
+
+    const sm = createSessionManager({ config, registry: registryWithScm });
+    const sessions = await sm.list();
+
+    expect(sessions[0].branch).toBe("feat/110");
+
+    const raw = readMetadataRaw(sessionsDir, "app-1");
+    expect(raw?.["branch"]).toBe("feat/110");
+    expect(raw?.["pr"]).toBe("https://github.com/org/my-app/pull/137");
+    expect(raw?.["status"]).toBe("pr_open");
+  });
+
+  it("refreshes a stale stored PR when branch detection finds a newer PR", async () => {
+    const mockSCM: SCM = {
+      name: "mock-scm",
+      detectPR: vi.fn().mockResolvedValue({
+        number: 138,
+        url: "https://github.com/org/my-app/pull/138",
+        title: "feat: add health endpoint",
+        owner: "org",
+        repo: "my-app",
+        branch: "feat/110",
+        baseBranch: "main",
+        isDraft: false,
+      }),
+      getPRState: vi.fn(),
+      mergePR: vi.fn(),
+      closePR: vi.fn(),
+      getCIChecks: vi.fn(),
+      getCISummary: vi.fn(),
+      getReviews: vi.fn(),
+      getReviewDecision: vi.fn(),
+      getPendingComments: vi.fn(),
+      getAutomatedComments: vi.fn(),
+      getMergeability: vi.fn(),
+    };
+
+    const registryWithScm: PluginRegistry = {
+      ...mockRegistry,
+      get: vi.fn().mockImplementation((slot: string) => {
+        if (slot === "runtime") return mockRuntime;
+        if (slot === "agent") return mockAgent;
+        if (slot === "scm") return mockSCM;
+        return null;
+      }),
+    };
+
+    writeMetadata(sessionsDir, "app-1", {
+      worktree: "/tmp",
+      branch: "feat/110",
+      status: "pr_open",
+      pr: "https://github.com/org/my-app/pull/137",
+      project: "my-app",
+      runtimeHandle: JSON.stringify(makeHandle("rt-1")),
+    });
+
+    const sm = createSessionManager({ config, registry: registryWithScm });
+    const sessions = await sm.list();
+
+    expect(sessions[0].pr?.url).toBe("https://github.com/org/my-app/pull/138");
+
+    const raw = readMetadataRaw(sessionsDir, "app-1");
+    expect(raw?.["pr"]).toBe("https://github.com/org/my-app/pull/138");
     expect(raw?.["status"]).toBe("pr_open");
   });
 
@@ -1784,6 +1886,52 @@ describe("restore", () => {
     expect(mockAgent.getLaunchCommand).toHaveBeenCalled();
     const createCall = (mockRuntime.create as ReturnType<typeof vi.fn>).mock.calls[0][0];
     expect(createCall.launchCommand).toBe("mock-agent --start");
+  });
+
+  it("sends reconstructed issue prompt post-launch on restore fallback", async () => {
+    const wsPath = join(tmpDir, "ws-app-1");
+    mkdirSync(wsPath, { recursive: true });
+
+    const mockAgentWithNullRestore: Agent = {
+      ...mockAgent,
+      promptDelivery: "post-launch",
+      getRestoreCommand: vi.fn().mockResolvedValue(null),
+    };
+
+    const registryWithNullRestore: PluginRegistry = {
+      ...mockRegistry,
+      get: vi.fn().mockImplementation((slot: string) => {
+        if (slot === "runtime") return mockRuntime;
+        if (slot === "agent") return mockAgentWithNullRestore;
+        if (slot === "workspace") return mockWorkspace;
+        return null;
+      }),
+    };
+
+    writeMetadata(sessionsDir, "app-1", {
+      worktree: wsPath,
+      branch: "feat/TEST-42",
+      status: "killed",
+      project: "my-app",
+      issue: "TEST-42",
+      runtimeHandle: JSON.stringify(makeHandle("rt-old")),
+    });
+
+    vi.useFakeTimers();
+    try {
+      const sm = createSessionManager({ config, registry: registryWithNullRestore });
+      const restorePromise = sm.restore("app-1");
+
+      await vi.advanceTimersByTimeAsync(5_000);
+      await restorePromise;
+
+      expect(mockRuntime.sendMessage).toHaveBeenCalledWith(
+        makeHandle("rt-1"),
+        expect.stringContaining("Work on issue: TEST-42"),
+      );
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("preserves original createdAt/issue/PR metadata", async () => {

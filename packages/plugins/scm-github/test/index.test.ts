@@ -63,8 +63,16 @@ function mockGh(result: unknown) {
   ghMock.mockResolvedValueOnce({ stdout: JSON.stringify(result) });
 }
 
+function mockGhChecks(result: unknown[]) {
+  ghMock.mockResolvedValueOnce({ stdout: JSON.stringify({ statusCheckRollup: result }) });
+}
+
 function mockGhError(msg = "Command failed") {
   ghMock.mockRejectedValueOnce(new Error(msg));
+}
+
+function mockGitBranch(branch: string) {
+  ghMock.mockResolvedValueOnce({ stdout: branch + "\n" });
 }
 
 // ---------------------------------------------------------------------------
@@ -129,6 +137,75 @@ describe("scm-github plugin", () => {
       mockGh([]);
       const result = await scm.detectPR(makeSession(), project);
       expect(result).toBeNull();
+    });
+
+    it("falls back to the live worktree branch when metadata branch is stale", async () => {
+      mockGh([]);
+      mockGitBranch("feat/110");
+      mockGh([
+        {
+          number: 137,
+          url: "https://github.com/acme/repo/pull/137",
+          title: "feat: add feature",
+          headRefName: "feat/110",
+          baseRefName: "main",
+          isDraft: false,
+        },
+      ]);
+
+      const result = await scm.detectPR(makeSession({ branch: "feat/issue-110" }), project);
+
+      expect(result?.number).toBe(137);
+      expect(result?.branch).toBe("feat/110");
+      expect(ghMock).toHaveBeenNthCalledWith(
+        1,
+        "gh",
+        expect.arrayContaining(["--search", "head:feat/issue-110", "--state", "all"]),
+        expect.any(Object),
+      );
+      expect(ghMock).toHaveBeenNthCalledWith(
+        2,
+        "git",
+        ["branch", "--show-current"],
+        expect.objectContaining({ cwd: "/tmp/repo" }),
+      );
+      expect(ghMock).toHaveBeenNthCalledWith(
+        3,
+        "gh",
+        expect.arrayContaining(["--search", "head:feat/110", "--state", "all"]),
+        expect.any(Object),
+      );
+    });
+
+    it("prefers an open PR over an older closed PR for the same branch", async () => {
+      mockGh([
+        {
+          number: 137,
+          url: "https://github.com/acme/repo/pull/137",
+          title: "closed PR",
+          headRefName: "feat/my-feature",
+          baseRefName: "main",
+          isDraft: false,
+          state: "CLOSED",
+          createdAt: "2026-03-06T09:16:53Z",
+          updatedAt: "2026-03-06T09:26:43Z",
+        },
+        {
+          number: 138,
+          url: "https://github.com/acme/repo/pull/138",
+          title: "open PR",
+          headRefName: "feat/my-feature",
+          baseRefName: "main",
+          isDraft: false,
+          state: "OPEN",
+          createdAt: "2026-03-06T09:40:53Z",
+          updatedAt: "2026-03-06T09:41:03Z",
+        },
+      ]);
+
+      const result = await scm.detectPR(makeSession(), project);
+      expect(result?.number).toBe(138);
+      expect(result?.url).toBe("https://github.com/acme/repo/pull/138");
     });
 
     it("returns null when session has no branch", async () => {
@@ -240,23 +317,95 @@ describe("scm-github plugin", () => {
 
   describe("getCIChecks", () => {
     it("maps various check states correctly", async () => {
-      mockGh([
+      mockGhChecks([
         {
+          __typename: "CheckRun",
           name: "build",
-          state: "SUCCESS",
-          link: "https://ci/1",
+          status: "COMPLETED",
+          conclusion: "SUCCESS",
+          detailsUrl: "https://ci/1",
           startedAt: "2025-01-01T00:00:00Z",
           completedAt: "2025-01-01T00:05:00Z",
         },
-        { name: "lint", state: "FAILURE", link: "", startedAt: "", completedAt: "" },
-        { name: "deploy", state: "PENDING", link: "", startedAt: "", completedAt: "" },
-        { name: "e2e", state: "IN_PROGRESS", link: "", startedAt: "", completedAt: "" },
-        { name: "optional", state: "SKIPPED", link: "", startedAt: "", completedAt: "" },
-        { name: "neutral", state: "NEUTRAL", link: "", startedAt: "", completedAt: "" },
-        { name: "timeout", state: "TIMED_OUT", link: "", startedAt: "", completedAt: "" },
-        { name: "queued", state: "QUEUED", link: "", startedAt: "", completedAt: "" },
-        { name: "cancelled", state: "CANCELLED", link: "", startedAt: "", completedAt: "" },
-        { name: "action_req", state: "ACTION_REQUIRED", link: "", startedAt: "", completedAt: "" },
+        {
+          __typename: "CheckRun",
+          name: "lint",
+          status: "COMPLETED",
+          conclusion: "FAILURE",
+          detailsUrl: "",
+          startedAt: "",
+          completedAt: "",
+        },
+        {
+          __typename: "StatusContext",
+          context: "deploy",
+          state: "PENDING",
+          targetUrl: "",
+          startedAt: "",
+        },
+        {
+          __typename: "CheckRun",
+          name: "e2e",
+          status: "IN_PROGRESS",
+          conclusion: "",
+          detailsUrl: "",
+          startedAt: "",
+          completedAt: "",
+        },
+        {
+          __typename: "CheckRun",
+          name: "optional",
+          status: "COMPLETED",
+          conclusion: "SKIPPED",
+          detailsUrl: "",
+          startedAt: "",
+          completedAt: "",
+        },
+        {
+          __typename: "CheckRun",
+          name: "neutral",
+          status: "COMPLETED",
+          conclusion: "NEUTRAL",
+          detailsUrl: "",
+          startedAt: "",
+          completedAt: "",
+        },
+        {
+          __typename: "CheckRun",
+          name: "timeout",
+          status: "COMPLETED",
+          conclusion: "TIMED_OUT",
+          detailsUrl: "",
+          startedAt: "",
+          completedAt: "",
+        },
+        {
+          __typename: "CheckRun",
+          name: "queued",
+          status: "QUEUED",
+          conclusion: "",
+          detailsUrl: "",
+          startedAt: "",
+          completedAt: "",
+        },
+        {
+          __typename: "CheckRun",
+          name: "cancelled",
+          status: "COMPLETED",
+          conclusion: "CANCELLED",
+          detailsUrl: "",
+          startedAt: "",
+          completedAt: "",
+        },
+        {
+          __typename: "CheckRun",
+          name: "action_req",
+          status: "COMPLETED",
+          conclusion: "ACTION_REQUIRED",
+          detailsUrl: "",
+          startedAt: "",
+          completedAt: "",
+        },
       ]);
 
       const checks = await scm.getCIChecks(pr);
@@ -280,12 +429,12 @@ describe("scm-github plugin", () => {
     });
 
     it("returns empty array for PR with no checks", async () => {
-      mockGh([]);
+      mockGhChecks([]);
       expect(await scm.getCIChecks(pr)).toEqual([]);
     });
 
     it("handles missing optional fields gracefully", async () => {
-      mockGh([{ name: "test", state: "SUCCESS" }]);
+      mockGhChecks([{ __typename: "CheckRun", name: "test", status: "COMPLETED", conclusion: "SUCCESS" }]);
       const checks = await scm.getCIChecks(pr);
       expect(checks[0].url).toBeUndefined();
       expect(checks[0].startedAt).toBeUndefined();
@@ -297,31 +446,31 @@ describe("scm-github plugin", () => {
 
   describe("getCISummary", () => {
     it('returns "failing" when any check failed', async () => {
-      mockGh([
-        { name: "a", state: "SUCCESS" },
-        { name: "b", state: "FAILURE" },
+      mockGhChecks([
+        { __typename: "CheckRun", name: "a", status: "COMPLETED", conclusion: "SUCCESS" },
+        { __typename: "CheckRun", name: "b", status: "COMPLETED", conclusion: "FAILURE" },
       ]);
       expect(await scm.getCISummary(pr)).toBe("failing");
     });
 
     it('returns "pending" when checks are running', async () => {
-      mockGh([
-        { name: "a", state: "SUCCESS" },
-        { name: "b", state: "IN_PROGRESS" },
+      mockGhChecks([
+        { __typename: "CheckRun", name: "a", status: "COMPLETED", conclusion: "SUCCESS" },
+        { __typename: "CheckRun", name: "b", status: "IN_PROGRESS", conclusion: "" },
       ]);
       expect(await scm.getCISummary(pr)).toBe("pending");
     });
 
     it('returns "passing" when all checks passed', async () => {
-      mockGh([
-        { name: "a", state: "SUCCESS" },
-        { name: "b", state: "SUCCESS" },
+      mockGhChecks([
+        { __typename: "CheckRun", name: "a", status: "COMPLETED", conclusion: "SUCCESS" },
+        { __typename: "StatusContext", context: "b", state: "SUCCESS" },
       ]);
       expect(await scm.getCISummary(pr)).toBe("passing");
     });
 
     it('returns "none" when no checks', async () => {
-      mockGh([]);
+      mockGhChecks([]);
       expect(await scm.getCISummary(pr)).toBe("none");
     });
 
@@ -331,9 +480,9 @@ describe("scm-github plugin", () => {
     });
 
     it('returns "none" when all checks are skipped', async () => {
-      mockGh([
-        { name: "a", state: "SKIPPED" },
-        { name: "b", state: "NEUTRAL" },
+      mockGhChecks([
+        { __typename: "CheckRun", name: "a", status: "COMPLETED", conclusion: "SKIPPED" },
+        { __typename: "CheckRun", name: "b", status: "COMPLETED", conclusion: "NEUTRAL" },
       ]);
       expect(await scm.getCISummary(pr)).toBe("none");
     });
@@ -747,7 +896,7 @@ describe("scm-github plugin", () => {
         mergeStateStatus: "UNSTABLE",
         isDraft: false,
       });
-      mockGh([{ name: "build", state: "FAILURE" }]);
+      mockGhChecks([{ __typename: "CheckRun", name: "build", status: "COMPLETED", conclusion: "FAILURE" }]);
 
       const result = await scm.getMergeability(pr);
       expect(result.ciPassing).toBe(false);
@@ -781,7 +930,7 @@ describe("scm-github plugin", () => {
         mergeStateStatus: "CLEAN",
         isDraft: false,
       });
-      mockGh([]); // no CI checks
+      mockGhChecks([]); // no CI checks
 
       const result = await scm.getMergeability(pr);
       expect(result.approved).toBe(false);
@@ -796,7 +945,7 @@ describe("scm-github plugin", () => {
         mergeStateStatus: "BLOCKED",
         isDraft: false,
       });
-      mockGh([]);
+      mockGhChecks([]);
 
       const result = await scm.getMergeability(pr);
       expect(result.blockers).toContain("Review required");
@@ -810,7 +959,7 @@ describe("scm-github plugin", () => {
         mergeStateStatus: "DIRTY",
         isDraft: false,
       });
-      mockGh([]);
+      mockGhChecks([]);
 
       const result = await scm.getMergeability(pr);
       expect(result.noConflicts).toBe(false);
@@ -825,7 +974,7 @@ describe("scm-github plugin", () => {
         mergeStateStatus: "CLEAN",
         isDraft: false,
       });
-      mockGh([{ name: "build", state: "SUCCESS" }]);
+      mockGhChecks([{ __typename: "CheckRun", name: "build", status: "COMPLETED", conclusion: "SUCCESS" }]);
 
       const result = await scm.getMergeability(pr);
       expect(result.noConflicts).toBe(false);
@@ -841,7 +990,7 @@ describe("scm-github plugin", () => {
         mergeStateStatus: "DRAFT",
         isDraft: true,
       });
-      mockGh([{ name: "build", state: "SUCCESS" }]);
+      mockGhChecks([{ __typename: "CheckRun", name: "build", status: "COMPLETED", conclusion: "SUCCESS" }]);
 
       const result = await scm.getMergeability(pr);
       expect(result.blockers).toContain("PR is still a draft");
@@ -856,7 +1005,7 @@ describe("scm-github plugin", () => {
         mergeStateStatus: "DIRTY",
         isDraft: true,
       });
-      mockGh([{ name: "build", state: "FAILURE" }]);
+      mockGhChecks([{ __typename: "CheckRun", name: "build", status: "COMPLETED", conclusion: "FAILURE" }]);
 
       const result = await scm.getMergeability(pr);
       expect(result.blockers).toHaveLength(4);

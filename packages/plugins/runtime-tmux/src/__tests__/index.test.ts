@@ -82,7 +82,8 @@ describe("runtime.create()", () => {
   it("calls new-session with correct args", async () => {
     const runtime = create();
 
-    // 1: new-session, 2: send-keys (launch command)
+    // 1: new-session, 2: send-keys -l (launch command), 3: Enter
+    mockTmuxSuccess();
     mockTmuxSuccess();
     mockTmuxSuccess();
 
@@ -113,6 +114,7 @@ describe("runtime.create()", () => {
 
     mockTmuxSuccess();
     mockTmuxSuccess();
+    mockTmuxSuccess();
 
     await runtime.create({
       sessionId: "env-session",
@@ -134,6 +136,7 @@ describe("runtime.create()", () => {
 
     mockTmuxSuccess();
     mockTmuxSuccess();
+    mockTmuxSuccess();
 
     await runtime.create({
       sessionId: "launch-test",
@@ -142,12 +145,53 @@ describe("runtime.create()", () => {
       environment: {},
     });
 
-    // Second call: send-keys with the launch command
-    expect(mockExecFileCustom).toHaveBeenCalledWith("tmux", [
+    // Second call: send-keys -l with the launch command
+    expect(mockExecFileCustom).toHaveBeenNthCalledWith(2, "tmux", [
       "send-keys",
       "-t",
       "launch-test",
+      "-l",
       "claude --session abc",
+    ]);
+    expect(mockExecFileCustom).toHaveBeenNthCalledWith(3, "tmux", [
+      "send-keys",
+      "-t",
+      "launch-test",
+      "Enter",
+    ]);
+  });
+
+  it("wraps long launch commands in a temp script", async () => {
+    const runtime = create();
+    const longCommand = "x".repeat(250);
+
+    mockTmuxSuccess();
+    mockTmuxSuccess();
+    mockTmuxSuccess();
+
+    await runtime.create({
+      sessionId: "launch-long",
+      workspacePath: "/tmp/ws",
+      launchCommand: longCommand,
+      environment: {},
+    });
+
+    expect(fs.writeFileSync).toHaveBeenCalledWith(
+      expect.stringContaining("ao-launch-test-uuid-1234.sh"),
+      expect.stringContaining(longCommand),
+      { encoding: "utf-8", mode: 0o700 },
+    );
+    expect(mockExecFileCustom).toHaveBeenNthCalledWith(2, "tmux", [
+      "send-keys",
+      "-t",
+      "launch-long",
+      "-l",
+      "bash '/tmp/ao-launch-test-uuid-1234.sh'",
+    ]);
+    expect(mockExecFileCustom).toHaveBeenNthCalledWith(3, "tmux", [
+      "send-keys",
+      "-t",
+      "launch-long",
       "Enter",
     ]);
   });
@@ -206,6 +250,7 @@ describe("runtime.create()", () => {
 
     mockTmuxSuccess();
     mockTmuxSuccess();
+    mockTmuxSuccess();
 
     const handle = await runtime.create({
       sessionId: "valid-session_123",
@@ -220,6 +265,7 @@ describe("runtime.create()", () => {
   it("handles no environment (undefined)", async () => {
     const runtime = create();
 
+    mockTmuxSuccess();
     mockTmuxSuccess();
     mockTmuxSuccess();
 
@@ -263,25 +309,36 @@ describe("runtime.sendMessage()", () => {
     const runtime = create();
     const handle = makeHandle("msg-short");
 
-    // 1: send-keys C-u (clear), 2: send-keys -l text, 3: send-keys Enter
+    // 1: detect pane, 2: Escape, 3: send-keys -l text, 4: send-keys Enter
+    mockTmuxSuccess(); // capture-pane detection
     mockTmuxSuccess();
     mockTmuxSuccess();
     mockTmuxSuccess();
 
     await runtime.sendMessage(handle, "hello world");
 
-    expect(mockExecFileCustom).toHaveBeenCalledTimes(3);
+    expect(mockExecFileCustom).toHaveBeenCalledTimes(4);
 
-    // Call 0: Clear partial input
+    // Call 0: capture-pane detection
     expect(mockExecFileCustom).toHaveBeenNthCalledWith(1, "tmux", [
+      "capture-pane",
+      "-t",
+      "msg-short",
+      "-p",
+      "-S",
+      "-60",
+    ]);
+
+    // Call 1: Escape
+    expect(mockExecFileCustom).toHaveBeenNthCalledWith(2, "tmux", [
       "send-keys",
       "-t",
       "msg-short",
-      "C-u",
+      "Escape",
     ]);
 
-    // Call 1: Literal text
-    expect(mockExecFileCustom).toHaveBeenNthCalledWith(2, "tmux", [
+    // Call 2: Literal text
+    expect(mockExecFileCustom).toHaveBeenNthCalledWith(3, "tmux", [
       "send-keys",
       "-t",
       "msg-short",
@@ -289,8 +346,8 @@ describe("runtime.sendMessage()", () => {
       "hello world",
     ]);
 
-    // Call 2: Enter
-    expect(mockExecFileCustom).toHaveBeenNthCalledWith(3, "tmux", [
+    // Call 3: Enter
+    expect(mockExecFileCustom).toHaveBeenNthCalledWith(4, "tmux", [
       "send-keys",
       "-t",
       "msg-short",
@@ -303,35 +360,48 @@ describe("runtime.sendMessage()", () => {
     const handle = makeHandle("msg-long");
     const longText = "x".repeat(250);
 
-    // 1: C-u, 2: load-buffer, 3: paste-buffer, 4: unlinkSync (sync), 5: delete-buffer, 6: Enter
-    mockTmuxSuccess(); // C-u
+    // 1: detect pane, 2: Escape, 3: load-buffer, 4: paste-buffer, 5: delete-buffer,
+    // 6: Enter, 7: capture-pane fallback check
+    mockTmuxSuccess(); // capture-pane detection
+    mockTmuxSuccess(); // Escape
     mockTmuxSuccess(); // load-buffer
     mockTmuxSuccess(); // paste-buffer
     mockTmuxSuccess(); // delete-buffer (finally block)
     mockTmuxSuccess(); // Enter
+    mockTmuxSuccess(); // capture-pane fallback check
 
     await runtime.sendMessage(handle, longText);
 
-    expect(mockExecFileCustom).toHaveBeenCalledTimes(5);
+    expect(mockExecFileCustom).toHaveBeenCalledTimes(7);
 
-    // Call 0: clear
+    // Call 0: capture-pane detection
     expect(mockExecFileCustom).toHaveBeenNthCalledWith(1, "tmux", [
+      "capture-pane",
+      "-t",
+      "msg-long",
+      "-p",
+      "-S",
+      "-60",
+    ]);
+
+    // Call 1: Escape
+    expect(mockExecFileCustom).toHaveBeenNthCalledWith(2, "tmux", [
       "send-keys",
       "-t",
       "msg-long",
-      "C-u",
+      "Escape",
     ]);
 
-    // Call 1: load-buffer with named buffer
-    expect(mockExecFileCustom).toHaveBeenNthCalledWith(2, "tmux", [
+    // Call 2: load-buffer with named buffer
+    expect(mockExecFileCustom).toHaveBeenNthCalledWith(3, "tmux", [
       "load-buffer",
       "-b",
       "ao-test-uuid-1234",
       expect.stringContaining("ao-send-test-uuid-1234.txt"),
     ]);
 
-    // Call 2: paste-buffer
-    expect(mockExecFileCustom).toHaveBeenNthCalledWith(3, "tmux", [
+    // Call 3: paste-buffer
+    expect(mockExecFileCustom).toHaveBeenNthCalledWith(4, "tmux", [
       "paste-buffer",
       "-b",
       "ao-test-uuid-1234",
@@ -357,16 +427,34 @@ describe("runtime.sendMessage()", () => {
     const runtime = create();
     const handle = makeHandle("msg-multi");
 
-    mockTmuxSuccess(); // C-u
+    mockTmuxSuccess(); // capture-pane detection
+    mockTmuxSuccess(); // Escape
     mockTmuxSuccess(); // load-buffer
     mockTmuxSuccess(); // paste-buffer
     mockTmuxSuccess(); // delete-buffer (finally)
     mockTmuxSuccess(); // Enter
+    mockTmuxSuccess(); // capture-pane fallback check
 
     await runtime.sendMessage(handle, "line1\nline2\nline3");
 
     // Should use buffer path, not send-keys -l
+    expect(mockExecFileCustom).toHaveBeenNthCalledWith(1, "tmux", [
+      "capture-pane",
+      "-t",
+      "msg-multi",
+      "-p",
+      "-S",
+      "-60",
+    ]);
+
     expect(mockExecFileCustom).toHaveBeenNthCalledWith(2, "tmux", [
+      "send-keys",
+      "-t",
+      "msg-multi",
+      "Escape",
+    ]);
+
+    expect(mockExecFileCustom).toHaveBeenNthCalledWith(3, "tmux", [
       "load-buffer",
       "-b",
       "ao-test-uuid-1234",
@@ -385,7 +473,8 @@ describe("runtime.sendMessage()", () => {
     const handle = makeHandle("msg-fail");
     const longText = "y".repeat(250);
 
-    mockTmuxSuccess(); // C-u
+    mockTmuxSuccess(); // capture-pane detection
+    mockTmuxSuccess(); // Escape
     mockTmuxSuccess(); // load-buffer succeeds
     mockTmuxError("paste-buffer failed"); // paste-buffer fails
     // finally block:
@@ -405,6 +494,103 @@ describe("runtime.sendMessage()", () => {
       "delete-buffer",
       "-b",
       "ao-test-uuid-1234",
+    ]);
+  });
+
+  it("retries submit with C-m when pasted content marker remains", async () => {
+    const runtime = create();
+    const handle = makeHandle("msg-marker");
+    const longText = "z".repeat(250);
+
+    mockTmuxSuccess(); // capture-pane detection
+    mockTmuxSuccess(); // Escape
+    mockTmuxSuccess(); // load-buffer
+    mockTmuxSuccess(); // paste-buffer
+    mockTmuxSuccess(); // delete-buffer
+    mockTmuxSuccess(); // Enter
+    mockTmuxSuccess("[Pasted Content 250 chars]"); // capture-pane detects unsent marker
+    mockTmuxSuccess(); // C-m fallback
+
+    await runtime.sendMessage(handle, longText);
+
+    expect(mockExecFileCustom).toHaveBeenNthCalledWith(7, "tmux", [
+      "capture-pane",
+      "-t",
+      "msg-marker",
+      "-p",
+      "-S",
+      "-40",
+    ]);
+
+    expect(mockExecFileCustom).toHaveBeenNthCalledWith(8, "tmux", [
+      "send-keys",
+      "-t",
+      "msg-marker",
+      "C-m",
+    ]);
+  });
+
+  it("uses chunked literal sends for long Codex messages", async () => {
+    const runtime = create();
+    const handle = makeHandle("msg-codex");
+    const longText = "x".repeat(250);
+
+    mockTmuxSuccess("OpenAI Codex\ngpt-5.4 high\n› "); // capture-pane detection
+    mockTmuxSuccess(); // chunk 1
+    mockTmuxSuccess(); // chunk 2
+    mockTmuxSuccess(); // chunk 3
+    mockTmuxSuccess(); // Enter
+
+    await runtime.sendMessage(handle, longText);
+
+    expect(mockExecFileCustom).toHaveBeenCalledTimes(5);
+    expect(mockExecFileCustom).toHaveBeenNthCalledWith(2, "tmux", [
+      "send-keys",
+      "-t",
+      "msg-codex",
+      "-l",
+      "x".repeat(120),
+    ]);
+    expect(mockExecFileCustom).toHaveBeenNthCalledWith(3, "tmux", [
+      "send-keys",
+      "-t",
+      "msg-codex",
+      "-l",
+      "x".repeat(120),
+    ]);
+    expect(mockExecFileCustom).toHaveBeenNthCalledWith(4, "tmux", [
+      "send-keys",
+      "-t",
+      "msg-codex",
+      "-l",
+      "x".repeat(10),
+    ]);
+    expect(fs.writeFileSync).not.toHaveBeenCalled();
+  });
+
+  it("uses C-j between lines for multiline Codex messages", async () => {
+    const runtime = create();
+    const handle = makeHandle("msg-codex-multi");
+
+    mockTmuxSuccess("OpenAI Codex\ngpt-5.4 high\n› "); // capture-pane detection
+    mockTmuxSuccess(); // line 1
+    mockTmuxSuccess(); // C-j
+    mockTmuxSuccess(); // line 2
+    mockTmuxSuccess(); // Enter
+
+    await runtime.sendMessage(handle, "line1\nline2");
+
+    expect(mockExecFileCustom).toHaveBeenNthCalledWith(3, "tmux", [
+      "send-keys",
+      "-t",
+      "msg-codex-multi",
+      "C-j",
+    ]);
+    expect(mockExecFileCustom).toHaveBeenNthCalledWith(5, "tmux", [
+      "send-keys",
+      "-t",
+      "msg-codex-multi",
+      "Enter",
     ]);
   });
 });

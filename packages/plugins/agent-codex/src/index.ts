@@ -566,6 +566,7 @@ function createCodexAgent(): Agent {
   return {
     name: "codex",
     processName: "codex",
+    promptDelivery: "inline",
 
     getLaunchCommand(config: AgentLaunchConfig): string {
       const binary = resolvedBinary ?? "codex";
@@ -573,6 +574,7 @@ function createCodexAgent(): Agent {
 
       appendApprovalFlags(parts, config.permissions as string | undefined);
       appendModelFlags(parts, config.model);
+      parts.push("-c", "disable_paste_burst=true");
 
       if (config.systemPromptFile) {
         // Codex reads developer instructions from a file via config override
@@ -582,10 +584,10 @@ function createCodexAgent(): Agent {
         parts.push("-c", `developer_instructions=${shellEscape(config.systemPrompt)}`);
       }
 
+      // Codex accepts an initial prompt as a positional argument. This is more
+      // reliable than injecting multiline text into the TUI composer via tmux.
       if (config.prompt) {
-        // Use `--` to end option parsing so prompts starting with `-` aren't
-        // misinterpreted as flags.
-        parts.push("--", shellEscape(config.prompt));
+        parts.push(shellEscape(config.prompt));
       }
 
       return parts.join(" ");

@@ -244,7 +244,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     sessionsDir: string,
     plugins: ReturnType<typeof resolvePlugins>,
   ): Promise<void> {
-    if (session.pr || !session.branch || !plugins.scm) return;
+    if (!session.branch || !plugins.scm) return;
 
     try {
       const detected = await plugins.scm.detectPR(session, project);
@@ -252,8 +252,18 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
 
       session.pr = detected;
 
-      const updates: Record<string, string> = { pr: detected.url };
-      session.metadata["pr"] = detected.url;
+      const updates: Record<string, string> = {};
+
+      if (session.metadata["pr"] !== detected.url) {
+        updates["pr"] = detected.url;
+        session.metadata["pr"] = detected.url;
+      }
+
+      if (detected.branch && detected.branch !== session.branch) {
+        session.branch = detected.branch;
+        updates["branch"] = detected.branch;
+        session.metadata["branch"] = detected.branch;
+      }
 
       if (shouldPromoteToPROpen(session.status)) {
         session.status = "pr_open";
@@ -261,7 +271,9 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
         session.metadata["status"] = "pr_open";
       }
 
-      updateMetadata(sessionsDir, session.id, updates);
+      if (Object.keys(updates).length > 0) {
+        updateMetadata(sessionsDir, session.id, updates);
+      }
     } catch {
       // SCM detection failed — keep existing metadata and retry on next refresh
     }
@@ -381,6 +393,58 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
         // Can't get session info — keep existing values
       }
     }
+  }
+
+  /** Heuristic: detect if agent input prompt is visible in terminal output. */
+  function isInteractivePromptVisible(agent: Agent, terminalOutput: string): boolean {
+    if (!terminalOutput.trim()) return false;
+    const tail = terminalOutput.split("\n").slice(-30).join("\n");
+
+    // Codex prompt glyph in TUI.
+    if (agent.processName === "codex") {
+      const recent = tail.split("\n").slice(-20).join("\n");
+      return /(?:^|\n)\s*›(?:\s|$)/.test(recent) && /\bgpt-[\w.-]+\b/.test(recent);
+    }
+
+    const activity = agent.detectActivity(tail);
+    return activity === "idle" || activity === "ready" || activity === "waiting_input";
+  }
+
+  /** Wait until agent is ready for interactive input (not just process alive). */
+  async function waitForAgentInputReady(
+    agent: Agent,
+    runtime: Runtime,
+    handle: RuntimeHandle,
+    timeoutMs = 30_000,
+    pollMs = 500,
+  ): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
+    let sawRunningProcess = false;
+    while (Date.now() < deadline) {
+      try {
+        const running = await agent.isProcessRunning(handle);
+        if (!running) {
+          await new Promise((resolve) => setTimeout(resolve, pollMs));
+          continue;
+        }
+        sawRunningProcess = true;
+
+        // For non-Codex agents, process liveness is sufficient.
+        if (agent.processName !== "codex") return true;
+
+        try {
+          const output = await runtime.getOutput(handle, 50);
+          if (isInteractivePromptVisible(agent, output)) return true;
+        } catch {
+          // Retry until timeout.
+        }
+      } catch {
+        // Ignore probe failures and retry until timeout.
+      }
+      await new Promise((resolve) => setTimeout(resolve, pollMs));
+    }
+    // Best-effort fallback if process is running but prompt wasn't detected in time.
+    return sawRunningProcess;
   }
 
   // Define methods as local functions so `this` is not needed
@@ -644,9 +708,10 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     // should NOT destroy the session. The agent is running; user can retry with `ao send`.
     if (plugins.agent.promptDelivery === "post-launch" && agentLaunchConfig.prompt) {
       try {
-        // Wait for agent to start and be ready for input
-        await new Promise((resolve) => setTimeout(resolve, 5_000));
-        await plugins.runtime.sendMessage(handle, agentLaunchConfig.prompt);
+        const ready = await waitForAgentInputReady(plugins.agent, plugins.runtime, handle);
+        if (ready) {
+          await plugins.runtime.sendMessage(handle, agentLaunchConfig.prompt);
+        }
       } catch {
         // Non-fatal: agent is running but didn't receive the initial prompt.
         // User can retry with `ao send`.
@@ -1176,6 +1241,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
 
     // 7. Get launch command — try restore command first, fall back to fresh launch
     let launchCommand: string;
+    let restoreInitialPrompt: string | undefined;
     const agentLaunchConfig = {
       sessionId,
       projectConfig: project,
@@ -1186,7 +1252,31 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
 
     if (plugins.agent.getRestoreCommand) {
       const restoreCmd = await plugins.agent.getRestoreCommand(session, project);
-      launchCommand = restoreCmd ?? plugins.agent.getLaunchCommand(agentLaunchConfig);
+      if (restoreCmd) {
+        launchCommand = restoreCmd;
+      } else {
+        // No agent-native resume available; re-inject issue context so restore
+        // behaves like a fresh spawn from the user's perspective.
+        let issueContext: string | undefined;
+        if (session.issueId && plugins.tracker) {
+          try {
+            issueContext = await plugins.tracker.generatePrompt(session.issueId, project);
+          } catch {
+            // Non-fatal: continue with generic context from buildPrompt
+          }
+        }
+        restoreInitialPrompt =
+          buildPrompt({
+            project,
+            projectId,
+            issueId: session.issueId ?? undefined,
+            issueContext,
+          }) ?? undefined;
+        launchCommand = plugins.agent.getLaunchCommand({
+          ...agentLaunchConfig,
+          prompt: restoreInitialPrompt,
+        });
+      }
     } else {
       launchCommand = plugins.agent.getLaunchCommand(agentLaunchConfig);
     }
@@ -1231,6 +1321,19 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
         await plugins.agent.postLaunchSetup(restoredSession);
       } catch {
         // Non-fatal — session is already running
+      }
+    }
+
+    // If restore fell back to a fresh launch (no native resume command),
+    // deliver the reconstructed prompt post-launch for interactive agents.
+    if (plugins.agent.promptDelivery === "post-launch" && restoreInitialPrompt) {
+      try {
+        const ready = await waitForAgentInputReady(plugins.agent, plugins.runtime, handle);
+        if (ready) {
+          await plugins.runtime.sendMessage(handle, restoreInitialPrompt);
+        }
+      } catch {
+        // Non-fatal: session is running; user can retry via `ao send`
       }
     }
 
