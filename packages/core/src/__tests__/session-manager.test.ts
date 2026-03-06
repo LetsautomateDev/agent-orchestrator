@@ -1566,6 +1566,24 @@ describe("spawnOrchestrator", () => {
 
     expect(session.runtimeHandle).toEqual(makeHandle("rt-1"));
   });
+
+  it("replaces a stale duplicate runtime session and retries create", async () => {
+    vi.mocked(mockRuntime.create)
+      .mockRejectedValueOnce(new Error("duplicate session: stale-orchestrator"))
+      .mockResolvedValueOnce(makeHandle("rt-recreated"));
+
+    const sm = createSessionManager({ config, registry: mockRegistry });
+    const session = await sm.spawnOrchestrator({ projectId: "my-app" });
+
+    expect(mockRuntime.create).toHaveBeenCalledTimes(2);
+    const firstCreateConfig = vi.mocked(mockRuntime.create).mock.calls[0][0];
+    expect(mockRuntime.destroy).toHaveBeenCalledWith({
+      id: firstCreateConfig.sessionId,
+      runtimeName: "mock",
+      data: {},
+    });
+    expect(session.runtimeHandle).toEqual(makeHandle("rt-recreated"));
+  });
 });
 
 describe("restore", () => {

@@ -29,6 +29,7 @@ import {
   type OrchestratorConfig,
   type ProjectConfig,
   type Runtime,
+  type RuntimeCreateConfig,
   type Agent,
   type Workspace,
   type Tracker,
@@ -81,6 +82,43 @@ function safeJsonParse<T>(str: string): T | null {
     return JSON.parse(str) as T;
   } catch {
     return null;
+  }
+}
+
+function isDuplicateRuntimeSessionError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  if (/duplicate session/i.test(message) || /already exists/i.test(message)) {
+    return true;
+  }
+
+  const cause = err instanceof Error ? err.cause : undefined;
+  if (cause) {
+    return isDuplicateRuntimeSessionError(cause);
+  }
+
+  return false;
+}
+
+async function createRuntimeWithDuplicateRecovery(
+  runtime: Runtime,
+  createConfig: RuntimeCreateConfig,
+): Promise<RuntimeHandle> {
+  try {
+    return await runtime.create(createConfig);
+  } catch (err) {
+    if (!isDuplicateRuntimeSessionError(err)) {
+      throw err;
+    }
+
+    // Runtimes like tmux can outlive metadata. If startup sees a stale session
+    // name collision, replace the orphaned runtime and recreate it once.
+    await runtime.destroy({
+      id: createConfig.sessionId,
+      runtimeName: runtime.name,
+      data: {},
+    });
+
+    return runtime.create(createConfig);
   }
 }
 
@@ -781,7 +819,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     const launchCommand = plugins.agent.getLaunchCommand(agentLaunchConfig);
     const environment = plugins.agent.getEnvironment(agentLaunchConfig);
 
-    const handle = await plugins.runtime.create({
+    const runtimeCreateConfig = {
       sessionId: tmuxName ?? sessionId,
       workspacePath: project.path,
       launchCommand,
@@ -792,7 +830,9 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
         AO_SESSION_NAME: sessionId,
         ...(tmuxName && { AO_TMUX_NAME: tmuxName }),
       },
-    });
+    };
+
+    const handle = await createRuntimeWithDuplicateRecovery(plugins.runtime, runtimeCreateConfig);
 
     // Write metadata and run post-launch setup
     const session: Session = {
