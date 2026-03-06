@@ -744,6 +744,26 @@ describe("scm-github plugin", () => {
       expect(comments[0].severity).toBe("error"); // "potential issue" → error
     });
 
+    it("treats [bot] login variants as automated comments", async () => {
+      mockGh([
+        {
+          id: 1,
+          user: { login: "greptile-apps[bot]" },
+          body: "Potential issue found",
+          path: "app/globals.css",
+          line: 161,
+          original_line: null,
+          created_at: "2026-03-06T19:47:19Z",
+          html_url: "https://github.com/org/repo/pull/42#discussion_r1",
+        },
+      ]);
+
+      const comments = await scm.getAutomatedComments(pr);
+      expect(comments).toHaveLength(1);
+      expect(comments[0].botName).toBe("greptile-apps[bot]");
+      expect(comments[0].severity).toBe("error");
+    });
+
     it("classifies severity from body content", async () => {
       mockGh([
         {

@@ -112,6 +112,77 @@ projects:
     it("should throw error if config not found", () => {
       expect(() => loadConfig()).toThrow("No agent-orchestrator.yaml found");
     });
+
+    it("should interpolate environment variables in config values", () => {
+      const configPath = join(testDir, "env-vars.yaml");
+      process.env["SLACK_WEBHOOK_URL"] = "https://hooks.slack.com/services/test/webhook";
+
+      writeFileSync(
+        configPath,
+        `
+projects:
+  test-project:
+    repo: test/repo
+    path: ${testDir}
+notifiers:
+  slack:
+    plugin: slack
+    webhookUrl: \${SLACK_WEBHOOK_URL}
+`,
+      );
+
+      const config = loadConfig(configPath);
+      expect(config.notifiers["slack"]?.webhookUrl).toBe(
+        "https://hooks.slack.com/services/test/webhook",
+      );
+    });
+
+    it("should throw when a referenced environment variable is missing", () => {
+      const configPath = join(testDir, "missing-env.yaml");
+
+      writeFileSync(
+        configPath,
+        `
+projects:
+  test-project:
+    repo: test/repo
+    path: ${testDir}
+notifiers:
+  slack:
+    plugin: slack
+    webhookUrl: \${SLACK_WEBHOOK_URL}
+`,
+      );
+
+      expect(() => loadConfig(configPath)).toThrow(
+        'Environment variable "SLACK_WEBHOOK_URL" is referenced in config but not set.',
+      );
+    });
+
+    it("should preserve default reaction messages when user overrides only some fields", () => {
+      const configPath = join(testDir, "partial-reactions.yaml");
+
+      writeFileSync(
+        configPath,
+        `
+projects:
+  test-project:
+    repo: test/repo
+    path: ${testDir}
+reactions:
+  changes-requested:
+    auto: true
+    action: send-to-agent
+    escalateAfter: 45m
+`,
+      );
+
+      const config = loadConfig(configPath);
+      expect(config.reactions["changes-requested"]?.message).toBe(
+        "There are review comments on your PR. Check with `gh pr view --comments` and `gh api` for inline comments. Address each one, push fixes, and reply.",
+      );
+      expect(config.reactions["changes-requested"]?.escalateAfter).toBe("45m");
+    });
   });
 
   describe("Config Discovery Priority", () => {

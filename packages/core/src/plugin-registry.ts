@@ -51,12 +51,38 @@ const BUILTIN_PLUGINS: Array<{ slot: PluginSlot; name: string; pkg: string }> = 
 
 /** Extract plugin-specific config from orchestrator config */
 function extractPluginConfig(
-  _slot: PluginSlot,
-  _name: string,
-  _config: OrchestratorConfig,
+  slot: PluginSlot,
+  name: string,
+  config: OrchestratorConfig,
 ): Record<string, unknown> | undefined {
-  // Reserved for future plugin-specific config mapping
+  if (slot === "notifier") {
+    const notifierConfig = config.notifiers?.[name];
+    if (notifierConfig && typeof notifierConfig === "object") {
+      return notifierConfig;
+    }
+  }
+
   return undefined;
+}
+
+function getEnabledNotifierNames(config: OrchestratorConfig): Set<string> {
+  const names = new Set<string>();
+
+  for (const name of config.defaults?.notifiers ?? []) {
+    names.add(name);
+  }
+
+  for (const routedNames of Object.values(config.notificationRouting ?? {})) {
+    for (const name of routedNames) {
+      names.add(name);
+    }
+  }
+
+  for (const name of Object.keys(config.notifiers ?? {})) {
+    names.add(name);
+  }
+
+  return names;
 }
 
 export function createPluginRegistry(): PluginRegistry {
@@ -90,7 +116,19 @@ export function createPluginRegistry(): PluginRegistry {
       importFn?: (pkg: string) => Promise<unknown>,
     ): Promise<void> {
       const doImport = importFn ?? ((pkg: string) => import(pkg));
+      const enabledNotifierNames = orchestratorConfig
+        ? getEnabledNotifierNames(orchestratorConfig)
+        : undefined;
+
       for (const builtin of BUILTIN_PLUGINS) {
+        if (
+          builtin.slot === "notifier" &&
+          enabledNotifierNames &&
+          !enabledNotifierNames.has(builtin.name)
+        ) {
+          continue;
+        }
+
         try {
           const mod = (await doImport(builtin.pkg)) as PluginModule;
           if (mod.manifest && typeof mod.create === "function") {

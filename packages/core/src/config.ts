@@ -117,6 +117,31 @@ function expandHome(filepath: string): string {
   return filepath;
 }
 
+/** Replace ${VAR_NAME} placeholders in parsed YAML values. */
+function interpolateEnvVars(value: unknown): unknown {
+  if (typeof value === "string") {
+    return value.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g, (_match, name: string) => {
+      const envValue = process.env[name];
+      if (envValue === undefined) {
+        throw new Error(`Environment variable "${name}" is referenced in config but not set.`);
+      }
+      return envValue;
+    });
+  }
+
+  if (Array.isArray(value)) {
+    return value.map((item) => interpolateEnvVars(item));
+  }
+
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, nestedValue]) => [key, interpolateEnvVars(nestedValue)]),
+    );
+  }
+
+  return value;
+}
+
 /** Expand all path fields in the config */
 function expandPaths(config: OrchestratorConfig): OrchestratorConfig {
   for (const project of Object.values(config.projects)) {
@@ -271,8 +296,16 @@ function applyDefaultReactions(config: OrchestratorConfig): OrchestratorConfig {
     },
   };
 
-  // Merge defaults with user-specified reactions (user wins)
-  config.reactions = { ...defaults, ...config.reactions };
+  // Merge defaults with user-specified reactions per reaction key so partial
+  // overrides keep default messages/retry behavior unless explicitly changed.
+  const mergedReactions: Record<string, (typeof config.reactions)[string]> = { ...defaults };
+  for (const [reactionKey, reactionConfig] of Object.entries(config.reactions)) {
+    mergedReactions[reactionKey] = {
+      ...(defaults[reactionKey] ?? {}),
+      ...reactionConfig,
+    };
+  }
+  config.reactions = mergedReactions;
 
   return config;
 }
@@ -368,7 +401,7 @@ export function loadConfig(configPath?: string): OrchestratorConfig {
   }
 
   const raw = readFileSync(path, "utf-8");
-  const parsed = parseYaml(raw);
+  const parsed = interpolateEnvVars(parseYaml(raw));
   const config = validateConfig(parsed);
 
   // Set the config path in the config object for hash generation
@@ -389,7 +422,7 @@ export function loadConfigWithPath(configPath?: string): {
   }
 
   const raw = readFileSync(path, "utf-8");
-  const parsed = parseYaml(raw);
+  const parsed = interpolateEnvVars(parseYaml(raw));
   const config = validateConfig(parsed);
 
   // Set the config path in the config object for hash generation

@@ -160,6 +160,47 @@ describe("loadBuiltins", () => {
     expect(registry.get("agent", "codex")).not.toBeNull();
     expect(registry.get("agent", "claude-code")).not.toBeNull();
   });
+
+  it("passes notifier config to enabled built-in notifiers and skips unused ones", async () => {
+    const registry = createPluginRegistry();
+    const fakeSlack = makePlugin("notifier", "slack");
+    const fakeWebhook = makePlugin("notifier", "webhook");
+
+    const config = makeOrchestratorConfig({
+      defaults: {
+        runtime: "tmux",
+        agent: "claude-code",
+        workspace: "worktree",
+        notifiers: ["slack"],
+      },
+      notifiers: {
+        slack: {
+          plugin: "slack",
+          webhookUrl: "https://hooks.slack.com/services/test",
+          channel: "#agent-updates",
+        },
+      },
+      notificationRouting: {
+        urgent: ["slack"],
+        action: ["slack"],
+        warning: ["slack"],
+        info: ["slack"],
+      },
+    });
+
+    await registry.loadBuiltins(config, async (pkg: string) => {
+      if (pkg === "@composio/ao-plugin-notifier-slack") return fakeSlack;
+      if (pkg === "@composio/ao-plugin-notifier-webhook") return fakeWebhook;
+      throw new Error(`Not found: ${pkg}`);
+    });
+
+    expect(fakeSlack.create).toHaveBeenCalledWith({
+      plugin: "slack",
+      webhookUrl: "https://hooks.slack.com/services/test",
+      channel: "#agent-updates",
+    });
+    expect(fakeWebhook.create).not.toHaveBeenCalled();
+  });
 });
 
 describe("extractPluginConfig (via register with config)", () => {

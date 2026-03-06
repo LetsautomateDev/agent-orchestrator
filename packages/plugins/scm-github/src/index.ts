@@ -41,6 +41,23 @@ const BOT_AUTHORS = new Set([
   "lgtm-com[bot]",
 ]);
 
+function normalizeAuthorLogin(login: string | null | undefined): string {
+  return (login ?? "").trim().toLowerCase().replace(/\[bot\]$/, "");
+}
+
+function isKnownBotAuthor(login: string | null | undefined): boolean {
+  const normalized = normalizeAuthorLogin(login);
+  if (!normalized) return false;
+
+  for (const author of BOT_AUTHORS) {
+    if (normalizeAuthorLogin(author) === normalized) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -538,8 +555,7 @@ function createGitHubSCM(): SCM {
             if (t.isResolved) return false; // only pending (unresolved) threads
             const c = t.comments.nodes[0];
             if (!c) return false; // skip threads with no comments
-            const author = c.author?.login ?? "";
-            return !BOT_AUTHORS.has(author);
+            return !isKnownBotAuthor(c.author?.login);
           })
           .map((t) => {
             const c = t.comments.nodes[0];
@@ -581,7 +597,7 @@ function createGitHubSCM(): SCM {
         }> = JSON.parse(raw);
 
         return comments
-          .filter((c) => BOT_AUTHORS.has(c.user?.login ?? ""))
+          .filter((c) => isKnownBotAuthor(c.user?.login))
           .map((c) => {
             // Determine severity from body content
             let severity: AutomatedComment["severity"] = "info";
