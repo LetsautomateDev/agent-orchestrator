@@ -131,7 +131,8 @@ async function postToWebhook(webhookUrl: string, payload: Record<string, unknown
 }
 
 export function create(config?: Record<string, unknown>): Notifier {
-  const webhookUrl = config?.webhookUrl as string | undefined;
+  const webhookUrl =
+    (config?.webhookUrl as string | undefined) ?? (config?.webhook as string | undefined);
   const defaultChannel = config?.channel as string | undefined;
   const username = (config?.username as string) ?? "Agent Orchestrator";
 

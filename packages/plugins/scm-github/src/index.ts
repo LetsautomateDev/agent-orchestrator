@@ -40,6 +40,41 @@ const BOT_AUTHORS = new Set([
   "lgtm-com[bot]",
 ]);
 
+function normalizeAuthorLogin(login: string | null | undefined): string {
+  return (login ?? "").trim().toLowerCase().replace(/\[bot\]$/, "");
+}
+
+function isKnownBotAuthor(login: string | null | undefined): boolean {
+  const normalized = normalizeAuthorLogin(login);
+  if (!normalized) return false;
+
+  for (const author of BOT_AUTHORS) {
+    if (normalizeAuthorLogin(author) === normalized) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+async function gh(args: string[]): Promise<string> {
+  try {
+    const { stdout } = await execFileAsync("gh", args, {
+      maxBuffer: 10 * 1024 * 1024,
+      timeout: 30_000,
+    });
+    return stdout.trim();
+  } catch (err) {
+    throw new Error(`gh ${args.slice(0, 3).join(" ")} failed: ${(err as Error).message}`, {
+      cause: err,
+    });
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -479,8 +514,7 @@ function createGitHubSCM(): SCM {
             if (t.isResolved) return false; // only pending (unresolved) threads
             const c = t.comments.nodes[0];
             if (!c) return false; // skip threads with no comments
-            const author = c.author?.login ?? "";
-            return !BOT_AUTHORS.has(author);
+            return !isKnownBotAuthor(c.author?.login);
           })
           .map((t) => {
             const c = t.comments.nodes[0];
@@ -495,10 +529,8 @@ function createGitHubSCM(): SCM {
               url: c.url,
             };
           });
-      } catch (err) {
-        // Propagate so callers (maybeDispatchReviewBacklog) can distinguish
-        // "no comments" from "failed to check" and avoid clearing metadata.
-        throw new Error("Failed to fetch pending comments", { cause: err });
+      } catch {
+        return [];
       }
     },
 
@@ -524,7 +556,7 @@ function createGitHubSCM(): SCM {
         }> = JSON.parse(raw);
 
         return comments
-          .filter((c) => BOT_AUTHORS.has(c.user?.login ?? ""))
+          .filter((c) => isKnownBotAuthor(c.user?.login))
           .map((c) => {
             // Determine severity from body content
             let severity: AutomatedComment["severity"] = "info";
@@ -555,8 +587,8 @@ function createGitHubSCM(): SCM {
               url: c.html_url,
             };
           });
-      } catch (err) {
-        throw new Error("Failed to fetch automated comments", { cause: err });
+      } catch {
+        return [];
       }
     },
 

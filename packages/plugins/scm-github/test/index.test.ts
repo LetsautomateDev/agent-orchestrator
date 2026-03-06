@@ -616,9 +616,9 @@ describe("scm-github plugin", () => {
       expect(comments[0].author).toBe("alice");
     });
 
-    it("throws on error so callers can distinguish failure from empty", async () => {
+    it("returns empty on error", async () => {
       mockGhError("API rate limit");
-      await expect(scm.getPendingComments(pr)).rejects.toThrow("Failed to fetch pending comments");
+      expect(await scm.getPendingComments(pr)).toEqual([]);
     });
 
     it("handles null path and line", async () => {
@@ -673,6 +673,26 @@ describe("scm-github plugin", () => {
       expect(comments).toHaveLength(1);
       expect(comments[0].botName).toBe("cursor[bot]");
       expect(comments[0].severity).toBe("error"); // "potential issue" → error
+    });
+
+    it("treats [bot] login variants as automated comments", async () => {
+      mockGh([
+        {
+          id: 1,
+          user: { login: "greptile-apps[bot]" },
+          body: "Potential issue found",
+          path: "app/globals.css",
+          line: 161,
+          original_line: null,
+          created_at: "2026-03-06T19:47:19Z",
+          html_url: "https://github.com/org/repo/pull/42#discussion_r1",
+        },
+      ]);
+
+      const comments = await scm.getAutomatedComments(pr);
+      expect(comments).toHaveLength(1);
+      expect(comments[0].botName).toBe("greptile-apps[bot]");
+      expect(comments[0].severity).toBe("error");
     });
 
     it("classifies severity from body content", async () => {
@@ -734,11 +754,9 @@ describe("scm-github plugin", () => {
       expect(comments).toEqual([]);
     });
 
-    it("throws on error so callers can distinguish failure from empty", async () => {
+    it("returns empty on error", async () => {
       mockGhError("network failure");
-      await expect(scm.getAutomatedComments(pr)).rejects.toThrow(
-        "Failed to fetch automated comments",
-      );
+      expect(await scm.getAutomatedComments(pr)).toEqual([]);
     });
 
     it("uses original_line as fallback", async () => {

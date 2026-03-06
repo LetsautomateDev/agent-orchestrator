@@ -43,6 +43,11 @@ describe("notifier-slack", () => {
       expect(notifier.name).toBe("slack");
     });
 
+    it("accepts legacy 'webhook' config key", () => {
+      const notifier = create({ webhook: "https://hooks.slack.com/test" });
+      expect(notifier.name).toBe("slack");
+    });
+
     it("warns when no webhookUrl configured", () => {
       const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
       create();
