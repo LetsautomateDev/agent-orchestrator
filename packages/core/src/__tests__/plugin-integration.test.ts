@@ -72,10 +72,6 @@ function mockGh(result: unknown): void {
   ghMock.mockResolvedValueOnce({ stdout: JSON.stringify(result) });
 }
 
-function mockExecError(message = "command failed"): void {
-  ghMock.mockRejectedValueOnce(new Error(message));
-}
-
 function makeGraphQLThreads(unresolvedCount = 0): unknown {
   return {
     data: {
@@ -390,9 +386,7 @@ describe("plugin integration", () => {
 
       // list() best-effort PR detection for both sessions → no PR found
       mockGh([]);
-      mockExecError("git branch failed");
       mockGh([]);
-      mockExecError("git branch failed");
       // Mock gh: issue is closed for the regular session
       mockGh({ state: "CLOSED" });
 
@@ -420,7 +414,6 @@ describe("plugin integration", () => {
 
       // list() best-effort PR detection → no PR found
       mockGh([]);
-      mockExecError("git branch failed");
       // Mock gh: issue is closed
       mockGh({ state: "CLOSED" });
 
@@ -450,7 +443,6 @@ describe("plugin integration", () => {
 
       // list() best-effort PR detection → no PR found
       mockGh([]);
-      mockExecError("git branch failed");
       // Mock gh: issue is still open — runtime also alive
       mockGh({ state: "OPEN" });
 
