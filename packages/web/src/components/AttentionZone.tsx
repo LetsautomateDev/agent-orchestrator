@@ -19,37 +19,44 @@ const zoneConfig: Record<
   {
     label: string;
     color: string;
+    bg: string;
     defaultCollapsed: boolean;
   }
 > = {
   merge: {
     label: "Merge",
     color: "var(--color-status-ready)",
+    bg: "var(--zone-merge-bg)",
     defaultCollapsed: false,
   },
   respond: {
     label: "Respond",
     color: "var(--color-status-error)",
+    bg: "var(--zone-respond-bg)",
     defaultCollapsed: false,
   },
   review: {
     label: "Review",
     color: "var(--color-accent-orange)",
+    bg: "var(--zone-review-bg)",
     defaultCollapsed: false,
   },
   pending: {
     label: "Pending",
     color: "var(--color-status-attention)",
+    bg: "var(--zone-pending-bg)",
     defaultCollapsed: false,
   },
   working: {
     label: "Working",
     color: "var(--color-status-working)",
+    bg: "var(--zone-working-bg)",
     defaultCollapsed: false,
   },
   done: {
     label: "Done",
     color: "var(--color-text-tertiary)",
+    bg: "var(--zone-done-bg)",
     defaultCollapsed: true,
   },
 };
@@ -70,22 +77,24 @@ export function AttentionZone({
 
   if (variant === "column") {
     return (
-      <div className="flex flex-col">
+      <div
+        className="surface-panel flex flex-col rounded-[16px] p-3"
+        style={{ backgroundColor: config.bg }}
+      >
         {/* Column header */}
         <button
-          className="mb-2.5 flex items-center gap-2 py-0.5 text-left"
+          className="mb-3 flex items-center gap-2 py-0.5 text-left"
           onClick={() => setCollapsed(!collapsed)}
         >
           <div
             className="h-1.5 w-1.5 shrink-0 rounded-full"
             style={{ background: config.color }}
           />
-          <span className="text-[10px] font-semibold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+          <span className="text-[10px] font-semibold uppercase tracking-[0.18em] text-[var(--color-text-tertiary)]">
             {config.label}
           </span>
           <span
-            className="rounded-full px-1.5 py-0 text-[10px] font-medium tabular-nums text-[var(--color-text-muted)]"
-            style={{ background: "var(--color-bg-subtle)" }}
+            className="soft-pill rounded-full px-1.5 py-0.5 text-[10px] font-medium tabular-nums text-[var(--color-text-muted)]"
           >
             {sessions.length}
           </span>
@@ -121,10 +130,13 @@ export function AttentionZone({
   }
 
   return (
-    <div className="mb-7">
+    <div
+      className="surface-panel mb-7 rounded-[18px] px-4 py-4"
+      style={{ backgroundColor: config.bg }}
+    >
       {/* Zone header: [●] LABEL ──────────────────────────────── count [▾] */}
       <button
-        className="mb-3 flex w-full items-center gap-2.5 py-0.5 text-left"
+        className="mb-4 flex w-full items-center gap-2.5 py-0.5 text-left"
         onClick={() => setCollapsed(!collapsed)}
       >
         {/* Semantic dot — only zone-colored element */}
@@ -133,13 +145,13 @@ export function AttentionZone({
           style={{ background: config.color }}
         />
         {/* Label — neutral, not zone-colored */}
-        <span className="text-[10px] font-medium uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+        <span className="text-[10px] font-semibold uppercase tracking-[0.18em] text-[var(--color-text-tertiary)]">
           {config.label}
         </span>
         {/* Divider */}
         <div className="h-px flex-1 bg-[var(--color-border-subtle)]" />
         {/* Count — plain */}
-        <span className="tabular-nums text-[11px] text-[var(--color-text-muted)]">
+        <span className="soft-pill tabular-nums rounded-full px-2 py-0.5 text-[11px] text-[var(--color-text-muted)]">
           {sessions.length}
         </span>
         {/* Collapse chevron */}

@@ -74,10 +74,8 @@ export function SessionCard({ session, onSend, onKill, onMerge, onRestore }: Ses
         pr?.state === "merged" && "opacity-55",
       )}
       style={{
-        borderRadius: 7,
-        background: (expanded && !isReadyToMerge)
-          ? "linear-gradient(175deg, rgba(32,41,53,1) 0%, rgba(22,28,37,1) 100%)"
-          : undefined,
+        borderRadius: 14,
+        background: expanded && !isReadyToMerge ? "var(--session-card-bg-expanded)" : undefined,
       }}
       onClick={(e) => {
         if ((e.target as HTMLElement).closest("a, button, textarea")) return;
@@ -94,7 +92,7 @@ export function SessionCard({ session, onSend, onKill, onMerge, onRestore }: Ses
         {isRestorable && (
           <button
             onClick={(e) => { e.stopPropagation(); onRestore?.(session.id); }}
-            className="rounded border border-[rgba(88,166,255,0.35)] px-2 py-0.5 text-[11px] text-[var(--color-accent)] transition-colors hover:bg-[rgba(88,166,255,0.1)]"
+            className="soft-pill rounded-full px-2.5 py-1 text-[11px] text-[var(--color-accent)] transition-colors hover:bg-[var(--color-accent-subtle)]"
           >
             restore
           </button>
@@ -103,7 +101,7 @@ export function SessionCard({ session, onSend, onKill, onMerge, onRestore }: Ses
           <a
             href={`/sessions/${encodeURIComponent(session.id)}`}
             onClick={(e) => e.stopPropagation()}
-            className="rounded border border-[var(--color-border-default)] bg-[var(--color-bg-subtle)] px-2.5 py-0.5 text-[11px] text-[var(--color-text-muted)] transition-colors hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] hover:no-underline"
+            className="soft-pill rounded-full px-2.5 py-1 text-[11px] text-[var(--color-text-muted)] transition-colors hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] hover:no-underline"
           >
             terminal
           </a>
@@ -154,7 +152,7 @@ export function SessionCard({ session, onSend, onKill, onMerge, onRestore }: Ses
           {isReadyToMerge && pr ? (
             <button
               onClick={(e) => { e.stopPropagation(); onMerge?.(pr.number); }}
-              className="inline-flex items-center gap-1.5 rounded-[5px] border-0 bg-[var(--color-status-ready)] px-3 py-1.5 text-[12px] font-semibold text-[var(--color-text-inverse)] transition-[filter,transform] duration-[100ms] hover:-translate-y-px hover:brightness-110"
+              className="inline-flex items-center gap-1.5 rounded-[10px] border border-[rgba(77,154,118,0.3)] bg-[rgba(77,154,118,0.12)] px-3.5 py-1.5 text-[12px] font-semibold text-[var(--color-status-ready)] transition-colors hover:bg-[rgba(77,154,118,0.18)]"
             >
               <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
                 <path d="M5 12h14M12 5l7 7-7 7" />
@@ -180,9 +178,9 @@ export function SessionCard({ session, onSend, onKill, onMerge, onRestore }: Ses
                   </a>
                   {alert.actionLabel && session.activity !== "active" && (
                     <button
-                      onClick={(e) => { e.stopPropagation(); handleAction(alert.key, alert.actionMessage ?? ""); }}
-                      disabled={sendingAction === alert.key}
-                      className="rounded border border-[rgba(88,166,255,0.25)] px-2 py-0.5 text-[11px] text-[var(--color-accent)] transition-colors hover:bg-[rgba(88,166,255,0.1)] disabled:opacity-50"
+                    onClick={(e) => { e.stopPropagation(); handleAction(alert.key, alert.actionMessage ?? ""); }}
+                    disabled={sendingAction === alert.key}
+                      className="soft-pill rounded-full px-2.5 py-1 text-[11px] text-[var(--color-accent)] transition-colors hover:bg-[var(--color-accent-subtle)] disabled:opacity-50"
                     >
                       {sendingAction === alert.key ? "sent!" : alert.actionLabel}
                     </button>

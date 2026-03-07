@@ -18,6 +18,7 @@ import {
   type PluginRegistry,
   type SessionManager,
   type SCM,
+  type Tracker,
   type ProjectConfig,
 } from "@composio/ao-core";
 
@@ -86,4 +87,13 @@ async function initServices(): Promise<Services> {
 export function getSCM(registry: PluginRegistry, project: ProjectConfig | undefined): SCM | null {
   if (!project?.scm) return null;
   return registry.get<SCM>("scm", project.scm.plugin);
+}
+
+/** Resolve the tracker plugin for a project. Returns null if not configured. */
+export function getTracker(
+  registry: PluginRegistry,
+  project: ProjectConfig | undefined,
+): Tracker | null {
+  if (!project?.tracker) return null;
+  return registry.get<Tracker>("tracker", project.tracker.plugin);
 }

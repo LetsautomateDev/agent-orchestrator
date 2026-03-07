@@ -11,17 +11,17 @@ interface CIBadgeProps {
 const statusConfig: Record<CIStatus, { label: string; className: string; icon: string }> = {
   passing: {
     label: "CI passing",
-    className: "bg-[rgba(63,185,80,0.1)] text-[var(--color-accent-green)]",
+    className: "border border-[rgba(77,154,118,0.24)] bg-[rgba(77,154,118,0.09)] text-[var(--color-accent-green)]",
     icon: "\u2713",
   },
   failing: {
     label: "CI failing",
-    className: "bg-[rgba(248,81,73,0.15)] text-[var(--color-accent-red)]",
+    className: "border border-[rgba(201,109,98,0.24)] bg-[rgba(201,109,98,0.1)] text-[var(--color-accent-red)]",
     icon: "\u2717",
   },
   pending: {
     label: "CI pending",
-    className: "bg-[rgba(210,153,34,0.1)] text-[var(--color-accent-yellow)]",
+    className: "border border-[rgba(199,162,74,0.24)] bg-[rgba(199,162,74,0.1)] text-[var(--color-accent-yellow)]",
     icon: "\u25CF",
   },
   none: {

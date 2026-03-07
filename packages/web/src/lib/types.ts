@@ -127,6 +127,20 @@ export interface DashboardStats {
   needsReview: number;
 }
 
+export interface DashboardIssue {
+  id: string;
+  title: string;
+  description: string;
+  url: string;
+  state: "open" | "in_progress" | "closed" | "cancelled";
+  labels: string[];
+  assignee?: string;
+  priority?: number;
+  projectId: string;
+  projectName: string;
+  repo?: string;
+}
+
 /** SSE snapshot event from /api/events */
 export interface SSESnapshotEvent {
   type: "snapshot";
