@@ -32,6 +32,7 @@ const BOT_AUTHORS = new Set([
   "cursor[bot]",
   "github-actions[bot]",
   "greptile-apps",
+  "greptile[bot]",
   "codecov[bot]",
   "sonarcloud[bot]",
   "dependabot[bot]",
@@ -43,7 +44,10 @@ const BOT_AUTHORS = new Set([
 ]);
 
 function normalizeAuthorLogin(login: string | null | undefined): string {
-  return (login ?? "").trim().toLowerCase().replace(/\[bot\]$/, "");
+  return (login ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/\[bot\]$/, "");
 }
 
 function isKnownBotAuthor(login: string | null | undefined): boolean {
@@ -57,6 +61,10 @@ function isKnownBotAuthor(login: string | null | undefined): boolean {
   }
 
   return false;
+}
+
+function isGreptileAuthor(login: string | null | undefined): boolean {
+  return normalizeAuthorLogin(login).startsWith("greptile");
 }
 
 // ---------------------------------------------------------------------------
@@ -119,7 +127,10 @@ type StatusCheckRollupItem =
       startedAt?: string;
     };
 
-function mapCheckRunStatus(status: string | undefined, conclusion: string | undefined): CICheck["status"] {
+function mapCheckRunStatus(
+  status: string | undefined,
+  conclusion: string | undefined,
+): CICheck["status"] {
   const normalizedStatus = status?.toUpperCase();
   const normalizedConclusion = conclusion?.toUpperCase();
 
@@ -222,6 +233,77 @@ function summarizeCIStatus(checks: CICheck[]): CIStatus {
   return "passing";
 }
 
+function isGreptileCheck(check: Pick<CICheck, "name">): boolean {
+  return check.name.toLowerCase().includes("greptile");
+}
+
+function getGreptileCheckState(checks: CICheck[]): "none" | "pending" | "failed" | "passed" {
+  const greptileChecks = checks.filter(isGreptileCheck);
+  if (greptileChecks.length === 0) return "none";
+  if (greptileChecks.some((check) => check.status === "failed")) return "failed";
+  if (greptileChecks.some((check) => check.status === "pending" || check.status === "running")) {
+    return "pending";
+  }
+  if (greptileChecks.some((check) => check.status === "passed")) return "passed";
+  return "none";
+}
+
+function extractGreptileScore(body: string | undefined | null): number | null {
+  const text = (body ?? "").trim();
+  if (!text) return null;
+
+  const confidenceMatch = text.match(/confidence\s+score[^0-9]*([0-5](?:\.\d+)?)\s*\/\s*5/i);
+  if (confidenceMatch) {
+    return Number(confidenceMatch[1]);
+  }
+
+  const genericMatch = text.match(/\b([0-5](?:\.\d+)?)\s*\/\s*5\b/);
+  if (genericMatch) {
+    return Number(genericMatch[1]);
+  }
+
+  return null;
+}
+
+async function fetchLatestGreptileScore(pr: PRInfo): Promise<number | null> {
+  const raw = await gh([
+    "pr",
+    "view",
+    String(pr.number),
+    "--repo",
+    repoFlag(pr),
+    "--json",
+    "reviews",
+  ]);
+
+  const data: {
+    reviews: Array<{
+      author?: { login?: string | null } | null;
+      body?: string | null;
+      submittedAt?: string | null;
+    }>;
+  } = JSON.parse(raw);
+
+  const latestGreptileReview = [...(data.reviews ?? [])]
+    .filter((review) => isGreptileAuthor(review.author?.login))
+    .sort((a, b) => parseDate(b.submittedAt).getTime() - parseDate(a.submittedAt).getTime())[0];
+
+  if (!latestGreptileReview) return null;
+  return extractGreptileScore(latestGreptileReview.body);
+}
+
+function getGreptileBlocker(opts: { checks: CICheck[]; score: number | null }): string | null {
+  const checkState = getGreptileCheckState(opts.checks);
+  const greptilePresent = checkState !== "none" || opts.score !== null;
+  if (!greptilePresent) return null;
+
+  if (checkState === "failed") return "Greptile check failed";
+  if (checkState === "pending") return "Greptile review pending";
+  if (opts.score === null) return "Awaiting Greptile score";
+  if (opts.score < 5) return `Greptile confidence score ${opts.score}/5 (requires 5/5)`;
+  return null;
+}
+
 function buildMergeReadiness(opts: {
   state: PRState;
   ciStatus: CIStatus;
@@ -229,6 +311,7 @@ function buildMergeReadiness(opts: {
   mergeable: string | undefined;
   mergeStateStatus: string | undefined;
   isDraft: boolean;
+  extraBlockers?: string[];
 }): MergeReadiness {
   if (opts.state === "merged") {
     return {
@@ -271,6 +354,12 @@ function buildMergeReadiness(opts: {
     }
     if (opts.isDraft) {
       blockers.push("PR is still a draft");
+    }
+  }
+
+  for (const blocker of opts.extraBlockers ?? []) {
+    if (blocker && !blockers.includes(blocker)) {
+      blockers.push(blocker);
     }
   }
 
@@ -460,21 +549,49 @@ async function fetchAutomatedCommentsRaw(pr: PRInfo): Promise<AutomatedComment[]
     });
 }
 
+function addGreptileSummaryComment(
+  automatedComments: AutomatedComment[],
+  greptileBlocker: string | null,
+  pr: PRInfo,
+): AutomatedComment[] {
+  if (
+    !greptileBlocker ||
+    greptileBlocker === "Greptile review pending" ||
+    automatedComments.some((comment) => isGreptileAuthor(comment.botName))
+  ) {
+    return automatedComments;
+  }
+
+  return [
+    ...automatedComments,
+    {
+      id: `greptile-summary-${pr.number}`,
+      botName: "greptile-apps",
+      body: greptileBlocker,
+      severity: "warning",
+      createdAt: new Date(),
+      url: pr.url,
+    },
+  ];
+}
+
 function pickBestPR<T extends { state?: string; updatedAt?: string; createdAt?: string }>(
   prs: T[],
 ): T | null {
   if (prs.length === 0) return null;
 
-  return [...prs].sort((a, b) => {
-    const aOpen = (a.state ?? "").toUpperCase() === "OPEN" ? 1 : 0;
-    const bOpen = (b.state ?? "").toUpperCase() === "OPEN" ? 1 : 0;
-    if (aOpen !== bOpen) return bOpen - aOpen;
+  return (
+    [...prs].sort((a, b) => {
+      const aOpen = (a.state ?? "").toUpperCase() === "OPEN" ? 1 : 0;
+      const bOpen = (b.state ?? "").toUpperCase() === "OPEN" ? 1 : 0;
+      if (aOpen !== bOpen) return bOpen - aOpen;
 
-    const updatedDiff = parseDate(b.updatedAt).getTime() - parseDate(a.updatedAt).getTime();
-    if (updatedDiff !== 0) return updatedDiff;
+      const updatedDiff = parseDate(b.updatedAt).getTime() - parseDate(a.updatedAt).getTime();
+      if (updatedDiff !== 0) return updatedDiff;
 
-    return parseDate(b.createdAt).getTime() - parseDate(a.createdAt).getTime();
-  })[0] ?? null;
+      return parseDate(b.createdAt).getTime() - parseDate(a.createdAt).getTime();
+    })[0] ?? null
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -561,10 +678,14 @@ function createGitHubSCM(): SCM {
         "state,title,additions,deletions,isDraft,reviewDecision,mergeable,mergeStateStatus,statusCheckRollup,updatedAt",
       ]);
 
-      const [prViewRaw, pendingR, automatedR] = await Promise.all([
+      const [prViewRaw, pendingR, automatedR, greptileR] = await Promise.all([
         prViewPromise,
-        Promise.allSettled([fetchPendingCommentsRaw(pr), fetchAutomatedCommentsRaw(pr)]),
-      ]).then(([summary, settled]) => [summary, settled[0], settled[1]] as const);
+        Promise.allSettled([
+          fetchPendingCommentsRaw(pr),
+          fetchAutomatedCommentsRaw(pr),
+          fetchLatestGreptileScore(pr),
+        ]),
+      ]).then(([summary, settled]) => [summary, settled[0], settled[1], settled[2]] as const);
 
       const summary: {
         state: string;
@@ -583,6 +704,11 @@ function createGitHubSCM(): SCM {
       const ciChecks = mapStatusCheckRollup(summary.statusCheckRollup ?? []);
       const ciStatus = summarizeCIStatus(ciChecks);
       const reviewDecision = mapReviewDecisionValue(summary.reviewDecision);
+      const greptileScore = greptileR.status === "fulfilled" ? greptileR.value : null;
+      const greptileBlocker = getGreptileBlocker({
+        checks: ciChecks,
+        score: greptileScore,
+      });
 
       let rateLimited = false;
       let pendingComments = stale?.pendingComments ?? [];
@@ -602,6 +728,10 @@ function createGitHubSCM(): SCM {
       } else {
         automatedComments = [];
       }
+      if (greptileR.status === "rejected" && isRateLimitError(greptileR.reason)) {
+        rateLimited = true;
+      }
+      automatedComments = addGreptileSummaryComment(automatedComments, greptileBlocker, pr);
 
       const snapshot: PRSnapshot = {
         state,
@@ -619,6 +749,7 @@ function createGitHubSCM(): SCM {
           mergeable: summary.mergeable,
           mergeStateStatus: summary.mergeStateStatus,
           isDraft: summary.isDraft ?? pr.isDraft,
+          extraBlockers: greptileBlocker ? [greptileBlocker] : [],
         }),
         pendingComments,
         automatedComments,
@@ -627,7 +758,11 @@ function createGitHubSCM(): SCM {
       };
 
       snapshotBackoff.delete(key);
-      return cacheSnapshot(key, snapshot, rateLimited ? RATE_LIMIT_BASE_BACKOFF_MS : SNAPSHOT_TTL_MS);
+      return cacheSnapshot(
+        key,
+        snapshot,
+        rateLimited ? RATE_LIMIT_BASE_BACKOFF_MS : SNAPSHOT_TTL_MS,
+      );
     } catch (error) {
       const rateLimitedSnapshot = markRateLimited(key, stale, error);
       if (rateLimitedSnapshot) return rateLimitedSnapshot;
@@ -924,86 +1059,7 @@ function createGitHubSCM(): SCM {
     },
 
     async getMergeability(pr: PRInfo): Promise<MergeReadiness> {
-      const blockers: string[] = [];
-
-      // First, check if the PR is merged
-      // GitHub returns mergeable=null for merged PRs, which is not useful
-      // Note: We only skip checks for merged PRs. Closed PRs still need accurate status.
-      const state = await this.getPRState(pr);
-      if (state === "merged") {
-        // For merged PRs, return a clean result without querying mergeable status
-        return {
-          mergeable: true,
-          ciPassing: true,
-          approved: true,
-          noConflicts: true,
-          blockers: [],
-        };
-      }
-
-      // Fetch PR details with merge state
-      const raw = await gh([
-        "pr",
-        "view",
-        String(pr.number),
-        "--repo",
-        repoFlag(pr),
-        "--json",
-        "mergeable,reviewDecision,mergeStateStatus,isDraft",
-      ]);
-
-      const data: {
-        mergeable: string;
-        reviewDecision: string;
-        mergeStateStatus: string;
-        isDraft: boolean;
-      } = JSON.parse(raw);
-
-      // CI
-      const ciStatus = await this.getCISummary(pr);
-      const ciPassing = ciStatus === CI_STATUS.PASSING || ciStatus === CI_STATUS.NONE;
-      if (!ciPassing) {
-        blockers.push(`CI is ${ciStatus}`);
-      }
-
-      // Reviews
-      const reviewDecision = (data.reviewDecision ?? "").toUpperCase();
-      const approved = reviewDecision === "APPROVED";
-      if (reviewDecision === "CHANGES_REQUESTED") {
-        blockers.push("Changes requested in review");
-      } else if (reviewDecision === "REVIEW_REQUIRED") {
-        blockers.push("Review required");
-      }
-
-      // Conflicts / merge state
-      const mergeable = (data.mergeable ?? "").toUpperCase();
-      const mergeState = (data.mergeStateStatus ?? "").toUpperCase();
-      const noConflicts = mergeable === "MERGEABLE";
-      if (mergeable === "CONFLICTING") {
-        blockers.push("Merge conflicts");
-      } else if (mergeable === "UNKNOWN" || mergeable === "") {
-        blockers.push("Merge status unknown (GitHub is computing)");
-      }
-      if (mergeState === "BEHIND") {
-        blockers.push("Branch is behind base branch");
-      } else if (mergeState === "BLOCKED") {
-        blockers.push("Merge is blocked by branch protection");
-      } else if (mergeState === "UNSTABLE") {
-        blockers.push("Required checks are failing");
-      }
-
-      // Draft
-      if (data.isDraft) {
-        blockers.push("PR is still a draft");
-      }
-
-      return {
-        mergeable: blockers.length === 0,
-        ciPassing,
-        approved,
-        noConflicts,
-        blockers,
-      };
+      return (await fetchPRSnapshot(pr)).mergeability;
     },
   };
 }

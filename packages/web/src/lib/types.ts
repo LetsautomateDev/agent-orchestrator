@@ -172,6 +172,12 @@ export function isPRRateLimited(pr: DashboardPR): boolean {
   return pr.mergeability.blockers.includes("API rate limited or unavailable");
 }
 
+function hasGreptileBlocker(pr: DashboardPR): boolean {
+  return pr.mergeability.blockers.some(
+    (blocker) => blocker.startsWith("Greptile ") || blocker.startsWith("Awaiting Greptile"),
+  );
+}
+
 /**
  * Returns true when a PR is open and all merge criteria are met.
  * Does NOT return true for merged or closed PRs — those are already done.
@@ -207,7 +213,7 @@ export function getAttentionLevel(session: DashboardSession): AttentionLevel {
   // ── Merge: PR is ready — one click to clear ───────────────────────
   // Check this early: if the PR is mergeable, that's the most valuable
   // action for the human regardless of agent activity.
-  if (session.status === "mergeable" || session.status === "approved") {
+  if (session.status === "mergeable") {
     return "merge";
   }
   if (session.pr?.mergeability.mergeable) {
@@ -243,6 +249,7 @@ export function getAttentionLevel(session: DashboardSession): AttentionLevel {
     const pr = session.pr;
     if (pr.ciStatus === CI_STATUS.FAILING) return "review";
     if (pr.reviewDecision === "changes_requested") return "review";
+    if (hasGreptileBlocker(pr)) return "review";
     if (!pr.mergeability.noConflicts) return "review";
   }
 

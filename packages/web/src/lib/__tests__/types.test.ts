@@ -138,9 +138,9 @@ describe("getAttentionLevel", () => {
       expect(getAttentionLevel(session)).toBe("merge");
     });
 
-    it("should return 'merge' for approved status", () => {
+    it("should not treat approved status alone as merge-ready", () => {
       const session = createSession({ status: "approved" });
-      expect(getAttentionLevel(session)).toBe("merge");
+      expect(getAttentionLevel(session)).toBe("working");
     });
 
     it("should return 'merge' when PR is mergeable", () => {
@@ -307,6 +307,38 @@ describe("getAttentionLevel", () => {
             approved: false,
             noConflicts: false,
             blockers: ["Merge conflicts"],
+          },
+          unresolvedThreads: 0,
+          unresolvedComments: [],
+        },
+      });
+      expect(getAttentionLevel(session)).toBe("review");
+    });
+
+    it("should return 'review' when Greptile blocks merge", () => {
+      const session = createSession({
+        status: "approved",
+        pr: {
+          number: 1,
+          url: "https://github.com/test/repo/pull/1",
+          title: "Test PR",
+          owner: "test",
+          repo: "repo",
+          branch: "feat/test",
+          baseBranch: "main",
+          isDraft: false,
+          state: "open",
+          additions: 10,
+          deletions: 5,
+          ciStatus: "passing",
+          ciChecks: [],
+          reviewDecision: "approved",
+          mergeability: {
+            mergeable: false,
+            ciPassing: true,
+            approved: true,
+            noConflicts: true,
+            blockers: ["Greptile confidence score 4/5 (requires 5/5)"],
           },
           unresolvedThreads: 0,
           unresolvedComments: [],

@@ -159,6 +159,12 @@ function eventToReactionKey(eventType: EventType): string | null {
   }
 }
 
+function hasGreptileBlocker(blockers: string[]): boolean {
+  return blockers.some(
+    (blocker) => blocker.startsWith("Greptile ") || blocker.startsWith("Awaiting Greptile"),
+  );
+}
+
 export interface LifecycleManagerDeps {
   config: OrchestratorConfig;
   registry: PluginRegistry;
@@ -220,9 +226,7 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
             "runtime",
             project.runtime ?? config.defaults.runtime,
           );
-          const terminalOutput = runtime
-            ? await runtime.getOutput(session.runtimeHandle, 10)
-            : "";
+          const terminalOutput = runtime ? await runtime.getOutput(session.runtimeHandle, 10) : "";
           if (terminalOutput) {
             const activity = agent.detectActivity(terminalOutput);
             if (activity === "waiting_input") return { status: "needs_input", prSnapshot };
@@ -274,9 +278,13 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
           if (prSnapshot.reviewDecision === "changes_requested") {
             return { status: "changes_requested", prSnapshot };
           }
-          if (prSnapshot.pendingComments.length > 0) return { status: "review_pending", prSnapshot };
+          if (prSnapshot.pendingComments.length > 0)
+            return { status: "review_pending", prSnapshot };
           if (prSnapshot.reviewDecision === "approved") {
             if (prSnapshot.mergeability.mergeable) return { status: "mergeable", prSnapshot };
+            if (hasGreptileBlocker(prSnapshot.mergeability.blockers)) {
+              return { status: "review_pending", prSnapshot };
+            }
             return { status: "approved", prSnapshot };
           }
           if (prSnapshot.reviewDecision === "pending") {
@@ -304,6 +312,9 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
         if (reviewDecision === "approved") {
           const mergeReady = await scm.getMergeability(session.pr);
           if (mergeReady.mergeable) return { status: "mergeable", prSnapshot };
+          if (hasGreptileBlocker(mergeReady.blockers)) {
+            return { status: "review_pending", prSnapshot };
+          }
           return { status: "approved", prSnapshot };
         }
         if (reviewDecision === "pending") return { status: "review_pending", prSnapshot };

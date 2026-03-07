@@ -21,13 +21,7 @@ export type SessionStatus =
   | "done"
   | "terminated";
 
-export type ActivityState =
-  | "active"
-  | "ready"
-  | "idle"
-  | "waiting_input"
-  | "blocked"
-  | "exited";
+export type ActivityState = "active" | "ready" | "idle" | "waiting_input" | "blocked" | "exited";
 
 export type CIStatus = "none" | "pending" | "passing" | "failing";
 export type ReviewDecision = "none" | "pending" | "approved" | "changes_requested";
@@ -118,7 +112,14 @@ export const ATTENTION_COLORS: Record<AttentionLevel, string> = {
 
 /** Statuses that indicate the session is in a terminal (dead) state.
  * Must stay in sync with packages/core/src/types.ts TERMINAL_STATUSES. */
-const TERMINAL_STATUSES: SessionStatus[] = ["killed", "terminated", "done", "cleanup", "errored", "merged"];
+const TERMINAL_STATUSES: SessionStatus[] = [
+  "killed",
+  "terminated",
+  "done",
+  "cleanup",
+  "errored",
+  "merged",
+];
 const TERMINAL_ACTIVITIES: ActivityState[] = ["exited"];
 
 /** Statuses that must never be restored (e.g. already merged).
@@ -140,6 +141,12 @@ export function isPRRateLimited(pr: DashboardPR): boolean {
   return pr.mergeability.blockers.includes("API rate limited or unavailable");
 }
 
+function hasGreptileBlocker(pr: DashboardPR): boolean {
+  return pr.mergeability.blockers.some(
+    (blocker) => blocker.startsWith("Greptile ") || blocker.startsWith("Awaiting Greptile"),
+  );
+}
+
 /** Determines which attention zone a session belongs to */
 export function getAttentionLevel(session: DashboardSession): AttentionLevel {
   // Done: terminal states
@@ -159,7 +166,7 @@ export function getAttentionLevel(session: DashboardSession): AttentionLevel {
   }
 
   // Merge: PR is ready
-  if (session.status === "mergeable" || session.status === "approved") {
+  if (session.status === "mergeable") {
     return "merge";
   }
   if (session.pr?.mergeability.mergeable) {
@@ -189,6 +196,7 @@ export function getAttentionLevel(session: DashboardSession): AttentionLevel {
     const pr = session.pr;
     if (pr.ciStatus === "failing") return "review";
     if (pr.reviewDecision === "changes_requested") return "review";
+    if (hasGreptileBlocker(pr)) return "review";
     if (!pr.mergeability.noConflicts) return "review";
   }
 

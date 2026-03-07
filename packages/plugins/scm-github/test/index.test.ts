@@ -75,6 +75,10 @@ function mockGitBranch(branch: string) {
   ghMock.mockResolvedValueOnce({ stdout: branch + "\n" });
 }
 
+function mockNoGreptileReviews() {
+  mockGh({ reviews: [] });
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -434,7 +438,9 @@ describe("scm-github plugin", () => {
     });
 
     it("handles missing optional fields gracefully", async () => {
-      mockGhChecks([{ __typename: "CheckRun", name: "test", status: "COMPLETED", conclusion: "SUCCESS" }]);
+      mockGhChecks([
+        { __typename: "CheckRun", name: "test", status: "COMPLETED", conclusion: "SUCCESS" },
+      ]);
       const checks = await scm.getCIChecks(pr);
       expect(checks[0].url).toBeUndefined();
       expect(checks[0].startedAt).toBeUndefined();
@@ -914,6 +920,7 @@ describe("scm-github plugin", () => {
           html_url: "https://github.com/c/auto-1",
         },
       ]);
+      mockNoGreptileReviews();
 
       const snapshot = await scm.getPRSnapshot?.(pr);
 
@@ -927,14 +934,83 @@ describe("scm-github plugin", () => {
       expect(snapshot?.mergeability.blockers).toContain("Merge conflicts");
       expect(snapshot?.rateLimited).toBe(false);
     });
+
+    it("adds a merge blocker when Greptile score is below 5/5", async () => {
+      mockGh({
+        state: "OPEN",
+        title: "feat: add feature",
+        additions: 12,
+        deletions: 4,
+        isDraft: false,
+        reviewDecision: "APPROVED",
+        mergeable: "MERGEABLE",
+        mergeStateStatus: "CLEAN",
+        statusCheckRollup: [
+          {
+            __typename: "CheckRun",
+            name: "Greptile",
+            status: "COMPLETED",
+            conclusion: "SUCCESS",
+          },
+        ],
+        updatedAt: "2025-01-01T00:00:00Z",
+      });
+      mockGh(makeSnapshotThreads());
+      mockGh([]);
+      mockGh({
+        reviews: [
+          {
+            author: { login: "greptile-apps" },
+            body: "Confidence Score: 4/5",
+            submittedAt: "2025-01-01T00:00:00Z",
+          },
+        ],
+      });
+
+      const snapshot = await scm.getPRSnapshot?.(pr);
+
+      expect(snapshot?.mergeability.mergeable).toBe(false);
+      expect(snapshot?.mergeability.blockers).toContain(
+        "Greptile confidence score 4/5 (requires 5/5)",
+      );
+      expect(
+        snapshot?.automatedComments.some((comment) => comment.botName === "greptile-apps"),
+      ).toBe(true);
+    });
   });
 
   // ---- getMergeability ---------------------------------------------------
 
   describe("getMergeability", () => {
-    it("returns clean result for merged PRs without querying mergeable status", async () => {
-      // getPRState call
-      mockGh({ state: "MERGED" });
+    function mockSnapshot(
+      summary: Record<string, unknown>,
+      opts?: { pendingThreads?: unknown; automatedComments?: unknown[]; reviews?: unknown[] },
+    ) {
+      mockGh({
+        title: "feat: add feature",
+        additions: 0,
+        deletions: 0,
+        updatedAt: "2025-01-01T00:00:00Z",
+        statusCheckRollup: [],
+        ...summary,
+      });
+      mockGh(
+        (opts?.pendingThreads as object) ?? {
+          data: { repository: { pullRequest: { reviewThreads: { nodes: [] } } } },
+        },
+      );
+      mockGh(opts?.automatedComments ?? []);
+      mockGh({ reviews: opts?.reviews ?? [] });
+    }
+
+    it("returns clean result for merged PRs", async () => {
+      mockSnapshot({
+        state: "MERGED",
+        reviewDecision: "APPROVED",
+        mergeable: "MERGEABLE",
+        mergeStateStatus: "CLEAN",
+        isDraft: false,
+      });
 
       const result = await scm.getMergeability(pr);
       expect(result).toEqual({
@@ -944,41 +1020,33 @@ describe("scm-github plugin", () => {
         noConflicts: true,
         blockers: [],
       });
-      // Should only call gh once (for getPRState), not for mergeable/CI
-      expect(ghMock).toHaveBeenCalledTimes(1);
     });
 
-    it("still checks mergeability for closed PRs (not merged)", async () => {
-      // getPRState call
-      mockGh({ state: "CLOSED" });
-      // PR view (closed PRs still get checked)
-      mockGh({
-        mergeable: "CONFLICTING",
+    it("does not mark closed PRs as mergeable", async () => {
+      mockSnapshot({
+        state: "CLOSED",
         reviewDecision: "APPROVED",
-        mergeStateStatus: "DIRTY",
-        isDraft: false,
-      });
-      // CI checks
-      mockGh([]);
-
-      const result = await scm.getMergeability(pr);
-      expect(result.noConflicts).toBe(false);
-      expect(result.blockers).toContain("Merge conflicts");
-      // Closed PRs go through normal checks, unlike merged PRs
-    });
-
-    it("returns mergeable when everything is clear", async () => {
-      // getPRState call (for open PR)
-      mockGh({ state: "OPEN" });
-      // PR view
-      mockGh({
         mergeable: "MERGEABLE",
-        reviewDecision: "APPROVED",
         mergeStateStatus: "CLEAN",
         isDraft: false,
       });
-      // CI checks (called by getCISummary)
-      mockGh([{ name: "build", state: "SUCCESS" }]);
+
+      const result = await scm.getMergeability(pr);
+      expect(result.mergeable).toBe(false);
+      expect(result.blockers).toEqual([]);
+    });
+
+    it("returns mergeable when everything is clear", async () => {
+      mockSnapshot({
+        state: "OPEN",
+        reviewDecision: "APPROVED",
+        mergeable: "MERGEABLE",
+        mergeStateStatus: "CLEAN",
+        isDraft: false,
+        statusCheckRollup: [
+          { __typename: "CheckRun", name: "build", status: "COMPLETED", conclusion: "SUCCESS" },
+        ],
+      });
 
       const result = await scm.getMergeability(pr);
       expect(result).toEqual({
@@ -991,31 +1059,16 @@ describe("scm-github plugin", () => {
     });
 
     it("reports CI failures as blockers", async () => {
-      mockGh({ state: "OPEN" }); // getPRState
-      mockGh({
-        mergeable: "MERGEABLE",
+      mockSnapshot({
+        state: "OPEN",
         reviewDecision: "APPROVED",
+        mergeable: "MERGEABLE",
         mergeStateStatus: "UNSTABLE",
         isDraft: false,
+        statusCheckRollup: [
+          { __typename: "CheckRun", name: "build", status: "COMPLETED", conclusion: "FAILURE" },
+        ],
       });
-      mockGhChecks([{ __typename: "CheckRun", name: "build", status: "COMPLETED", conclusion: "FAILURE" }]);
-
-      const result = await scm.getMergeability(pr);
-      expect(result.ciPassing).toBe(false);
-      expect(result.mergeable).toBe(false);
-      expect(result.blockers).toContain("CI is failing");
-      expect(result.blockers).toContain("Required checks are failing");
-    });
-
-    it("reports UNSTABLE merge state even when CI fetch fails", async () => {
-      mockGh({ state: "OPEN" }); // getPRState
-      mockGh({
-        mergeable: "MERGEABLE",
-        reviewDecision: "APPROVED",
-        mergeStateStatus: "UNSTABLE",
-        isDraft: false,
-      });
-      mockGhError("rate limited");
 
       const result = await scm.getMergeability(pr);
       expect(result.ciPassing).toBe(false);
@@ -1025,14 +1078,13 @@ describe("scm-github plugin", () => {
     });
 
     it("reports changes requested as blockers", async () => {
-      mockGh({ state: "OPEN" }); // getPRState
-      mockGh({
-        mergeable: "MERGEABLE",
+      mockSnapshot({
+        state: "OPEN",
         reviewDecision: "CHANGES_REQUESTED",
+        mergeable: "MERGEABLE",
         mergeStateStatus: "CLEAN",
         isDraft: false,
       });
-      mockGhChecks([]); // no CI checks
 
       const result = await scm.getMergeability(pr);
       expect(result.approved).toBe(false);
@@ -1040,28 +1092,26 @@ describe("scm-github plugin", () => {
     });
 
     it("reports review required as blocker", async () => {
-      mockGh({ state: "OPEN" }); // getPRState
-      mockGh({
-        mergeable: "MERGEABLE",
+      mockSnapshot({
+        state: "OPEN",
         reviewDecision: "REVIEW_REQUIRED",
+        mergeable: "MERGEABLE",
         mergeStateStatus: "BLOCKED",
         isDraft: false,
       });
-      mockGhChecks([]);
 
       const result = await scm.getMergeability(pr);
       expect(result.blockers).toContain("Review required");
     });
 
     it("reports merge conflicts as blockers", async () => {
-      mockGh({ state: "OPEN" }); // getPRState
-      mockGh({
-        mergeable: "CONFLICTING",
+      mockSnapshot({
+        state: "OPEN",
         reviewDecision: "APPROVED",
+        mergeable: "CONFLICTING",
         mergeStateStatus: "DIRTY",
         isDraft: false,
       });
-      mockGhChecks([]);
 
       const result = await scm.getMergeability(pr);
       expect(result.noConflicts).toBe(false);
@@ -1069,14 +1119,16 @@ describe("scm-github plugin", () => {
     });
 
     it("reports UNKNOWN mergeable as noConflicts false", async () => {
-      mockGh({ state: "OPEN" }); // getPRState
-      mockGh({
-        mergeable: "UNKNOWN",
+      mockSnapshot({
+        state: "OPEN",
         reviewDecision: "APPROVED",
+        mergeable: "UNKNOWN",
         mergeStateStatus: "CLEAN",
         isDraft: false,
+        statusCheckRollup: [
+          { __typename: "CheckRun", name: "build", status: "COMPLETED", conclusion: "SUCCESS" },
+        ],
       });
-      mockGhChecks([{ __typename: "CheckRun", name: "build", status: "COMPLETED", conclusion: "SUCCESS" }]);
 
       const result = await scm.getMergeability(pr);
       expect(result.noConflicts).toBe(false);
@@ -1085,14 +1137,16 @@ describe("scm-github plugin", () => {
     });
 
     it("reports draft status as blocker", async () => {
-      mockGh({ state: "OPEN" }); // getPRState
-      mockGh({
-        mergeable: "MERGEABLE",
+      mockSnapshot({
+        state: "OPEN",
         reviewDecision: "APPROVED",
+        mergeable: "MERGEABLE",
         mergeStateStatus: "DRAFT",
         isDraft: true,
+        statusCheckRollup: [
+          { __typename: "CheckRun", name: "build", status: "COMPLETED", conclusion: "SUCCESS" },
+        ],
       });
-      mockGhChecks([{ __typename: "CheckRun", name: "build", status: "COMPLETED", conclusion: "SUCCESS" }]);
 
       const result = await scm.getMergeability(pr);
       expect(result.blockers).toContain("PR is still a draft");
@@ -1100,18 +1154,54 @@ describe("scm-github plugin", () => {
     });
 
     it("reports multiple blockers simultaneously", async () => {
-      mockGh({ state: "OPEN" }); // getPRState
-      mockGh({
-        mergeable: "CONFLICTING",
+      mockSnapshot({
+        state: "OPEN",
         reviewDecision: "CHANGES_REQUESTED",
+        mergeable: "CONFLICTING",
         mergeStateStatus: "DIRTY",
         isDraft: true,
+        statusCheckRollup: [
+          { __typename: "CheckRun", name: "build", status: "COMPLETED", conclusion: "FAILURE" },
+        ],
       });
-      mockGhChecks([{ __typename: "CheckRun", name: "build", status: "COMPLETED", conclusion: "FAILURE" }]);
 
       const result = await scm.getMergeability(pr);
       expect(result.blockers).toHaveLength(4);
       expect(result.mergeable).toBe(false);
+    });
+
+    it("blocks merge until Greptile reports 5/5", async () => {
+      mockSnapshot(
+        {
+          state: "OPEN",
+          reviewDecision: "APPROVED",
+          mergeable: "MERGEABLE",
+          mergeStateStatus: "CLEAN",
+          isDraft: false,
+          statusCheckRollup: [
+            { __typename: "CheckRun", name: "build", status: "COMPLETED", conclusion: "SUCCESS" },
+            {
+              __typename: "CheckRun",
+              name: "Greptile",
+              status: "COMPLETED",
+              conclusion: "SUCCESS",
+            },
+          ],
+        },
+        {
+          reviews: [
+            {
+              author: { login: "greptile-apps" },
+              body: "Confidence Score: 4/5",
+              submittedAt: "2025-01-01T00:00:00Z",
+            },
+          ],
+        },
+      );
+
+      const result = await scm.getMergeability(pr);
+      expect(result.mergeable).toBe(false);
+      expect(result.blockers).toContain("Greptile confidence score 4/5 (requires 5/5)");
     });
   });
 });
