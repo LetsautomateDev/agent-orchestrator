@@ -1,0 +1,16 @@
+{
+  "strictness": 1,
+  "instructions": "This directory defines shared contracts, lifecycle behavior, and config loading used by the entire monorepo. Be stricter here: drift in core types, event mappings, or schemas causes repo-wide regressions.",
+  "rules": [
+    {
+      "id": "core-contract-sync",
+      "rule": "When changing shared types, session statuses, event types, reaction keys, serializers, or config schemas, verify all call sites, fixtures, API consumers, YAML examples, and tests are updated in the same PR.",
+      "severity": "high"
+    },
+    {
+      "id": "metadata-compatibility",
+      "rule": "Preserve backwards compatibility of flat session metadata files and orchestrator config loading unless the PR explicitly includes a migration strategy and regression coverage.",
+      "severity": "high"
+    }
+  ]
+}

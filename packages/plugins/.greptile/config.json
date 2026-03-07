@@ -1,0 +1,21 @@
+{
+  "strictness": 1,
+  "instructions": "This directory contains integrations with external tools and operating-system surfaces. Favor comments about correctness, cleanup, and untrusted inputs over style-only feedback.",
+  "rules": [
+    {
+      "id": "plugin-contract-shape",
+      "rule": "Plugin implementations must match their declared slot, import contracts from @composio/ao-core, and keep the manifest/create/default export shape consistent with PluginModule<T>.",
+      "severity": "high"
+    },
+    {
+      "id": "plugin-untrusted-io",
+      "rule": "Treat CLI output, API payloads, metadata files, and OS integration responses as untrusted. Parse defensively, validate presence and types before use, and fail with actionable errors when assumptions break.",
+      "severity": "high"
+    },
+    {
+      "id": "plugin-cleanup-guarantees",
+      "rule": "Destroy and teardown paths must release tmux sessions, temp files, symlinks, streams, listeners, child processes, and partial setup artifacts even after errors or timeouts.",
+      "severity": "high"
+    }
+  ]
+}

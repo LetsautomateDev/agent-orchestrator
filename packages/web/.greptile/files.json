@@ -1,0 +1,20 @@
+{
+  "files": [
+    {
+      "path": "packages/core/src/types.ts",
+      "description": "Shared session and event contracts consumed by the dashboard."
+    },
+    {
+      "path": "packages/web/src/lib/serialize.ts",
+      "description": "Serialization layer between core data structures and client-safe payloads."
+    },
+    {
+      "path": "packages/web/src/app/api/events/route.ts",
+      "description": "Representative long-lived event stream route with cleanup concerns."
+    },
+    {
+      "path": "packages/web/src/__tests__/api-routes.test.ts",
+      "description": "Representative coverage for API route behavior and integration expectations."
+    }
+  ]
+}

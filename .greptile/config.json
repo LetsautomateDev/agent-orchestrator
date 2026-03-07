@@ -1,0 +1,69 @@
+{
+  "strictness": 2,
+  "commentTypes": ["logic", "syntax", "info"],
+  "triggerOnUpdates": true,
+  "statusCheck": true,
+  "statusCommentsEnabled": true,
+  "updateExistingSummaryComment": true,
+  "fixWithAI": true,
+  "ignorePatterns": "**/node_modules/**\n**/dist/**\n**/.next/**\npackages/web/screenshots/**\ndocs/assets/**\nartifacts/**\nscripts/**\npackages/web/src/lib/mock-data.ts\npnpm-lock.yaml",
+  "summarySection": {
+    "included": true,
+    "collapsible": false,
+    "defaultOpen": true
+  },
+  "issuesTableSection": {
+    "included": true,
+    "collapsible": true,
+    "defaultOpen": false
+  },
+  "confidenceScoreSection": {
+    "included": true,
+    "collapsible": true,
+    "defaultOpen": false
+  },
+  "sequenceDiagramSection": {
+    "included": false,
+    "collapsible": true,
+    "defaultOpen": false
+  },
+  "instructions": "Review this repository as a pnpm TypeScript monorepo for orchestrating parallel AI coding agents. Prioritize correctness and regressions in session lifecycle, worktree isolation, SCM integrations, plugin contracts, and web/API state propagation. Favor high-signal comments over formatting nits.",
+  "rules": [
+    {
+      "id": "secure-process-exec",
+      "rule": "For production code that executes external programs or shells, require execFile or spawn with argv arrays and explicit timeouts. Flag uses of exec, string-built shell commands, or untrusted values flowing into tmux, git, gh, AppleScript, GraphQL, or similar OS/API command surfaces.",
+      "scope": ["packages/**/src/**", "packages/web/server/**"],
+      "severity": "high"
+    },
+    {
+      "id": "defensive-json-parse",
+      "rule": "Treat JSON from files, metadata, CLI output, web requests, or external APIs as untrusted. Require try/catch or equivalent validation before property access, especially in non-test code.",
+      "scope": ["packages/**/src/**", "packages/web/server/**"],
+      "severity": "high"
+    },
+    {
+      "id": "esm-import-hygiene",
+      "rule": "Runtime TypeScript code must keep ESM import hygiene: local imports use explicit .js extensions and Node builtins use the node: prefix.",
+      "scope": ["packages/**/src/**", "packages/web/server/**"],
+      "severity": "high"
+    },
+    {
+      "id": "plugin-module-contract",
+      "rule": "Plugin packages must import contracts from @composio/ao-core, export manifest and create, and default export `{ manifest, create } satisfies PluginModule<T>` using the correct slot interface.",
+      "scope": ["packages/plugins/**/src/index.ts"],
+      "severity": "high"
+    },
+    {
+      "id": "cleanup-long-lived-resources",
+      "rule": "Flag missing cleanup for timers, event listeners, streams, temp files, subprocesses, tmux resources, and long-lived connections. Teardown paths must run on disconnect, destroy, exit, and partial failure paths.",
+      "scope": ["packages/**/src/**", "packages/web/server/**"],
+      "severity": "high"
+    },
+    {
+      "id": "core-types-source-of-truth",
+      "rule": "Do not fork or silently drift contracts that already exist in packages/core/src/types.ts or config schemas. Shared behavior changes should reuse or update the core source of truth rather than duplicating local types.",
+      "scope": ["packages/**/src/**"],
+      "severity": "medium"
+    }
+  ]
+}

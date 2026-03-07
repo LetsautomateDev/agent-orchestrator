@@ -1,0 +1,39 @@
+{
+  "files": [
+    {
+      "path": "README.md",
+      "description": "Repository overview, architecture summary, and top-level configuration shape."
+    },
+    {
+      "path": "CLAUDE.md",
+      "description": "Authoritative project conventions for ESM imports, plugin exports, shell safety, and testing expectations."
+    },
+    {
+      "path": "agent-orchestrator.yaml.example",
+      "description": "Canonical config example for orchestrator behavior and reaction settings."
+    },
+    {
+      "path": "packages/core/src/types.ts",
+      "description": "Source of truth for shared interfaces, events, session states, and plugin contracts."
+    },
+    {
+      "path": "packages/core/README.md",
+      "description": "Overview of core services, lifecycle behavior, and config responsibilities."
+    },
+    {
+      "path": "packages/plugins/runtime-tmux/src/index.ts",
+      "description": "Reference runtime plugin implementation for process execution, cleanup, and tmux integration.",
+      "scope": ["packages/plugins/**"]
+    },
+    {
+      "path": "packages/plugins/agent-claude-code/src/index.ts",
+      "description": "Reference agent plugin implementation for activity parsing, file-backed state, and plugin export shape.",
+      "scope": ["packages/plugins/**"]
+    },
+    {
+      "path": "packages/web/src/lib/serialize.ts",
+      "description": "Reference for server-to-client serialization contracts in the dashboard.",
+      "scope": ["packages/web/**"]
+    }
+  ]
+}

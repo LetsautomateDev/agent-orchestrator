@@ -1,0 +1,16 @@
+{
+  "files": [
+    {
+      "path": "packages/core/src/types.ts",
+      "description": "Shared slot interfaces and plugin contract source of truth."
+    },
+    {
+      "path": "packages/plugins/runtime-tmux/src/index.ts",
+      "description": "Reference runtime plugin implementation for setup/teardown and safe command execution."
+    },
+    {
+      "path": "packages/plugins/agent-claude-code/src/index.ts",
+      "description": "Reference agent plugin implementation for activity parsing and persisted settings handling."
+    }
+  ]
+}

@@ -1,0 +1,20 @@
+{
+  "files": [
+    {
+      "path": "packages/core/src/types.ts",
+      "description": "Shared contracts and enums that other packages depend on."
+    },
+    {
+      "path": "packages/core/src/config.ts",
+      "description": "Zod-backed config loading and default reaction behavior."
+    },
+    {
+      "path": "packages/core/src/lifecycle-manager.ts",
+      "description": "Lifecycle state machine and event-to-reaction mapping."
+    },
+    {
+      "path": "packages/core/src/session-manager.ts",
+      "description": "Session creation, validation, and cleanup orchestration."
+    }
+  ]
+}

@@ -1,0 +1,21 @@
+{
+  "strictness": 1,
+  "instructions": "This directory contains the Next.js dashboard, API routes, and state serialization for orchestrator sessions. Prioritize correctness at request boundaries, streaming cleanup, and shared payload shape changes.",
+  "rules": [
+    {
+      "id": "web-input-validation",
+      "rule": "Treat route params, query strings, request bodies, session IDs, filesystem paths, and command-like inputs as untrusted. Validate and normalize them before using them in filesystem, plugin, process, or network calls.",
+      "severity": "high"
+    },
+    {
+      "id": "web-stream-cleanup",
+      "rule": "Server-Sent Events, polling loops, timers, event subscriptions, and long-lived connections must stop or unsubscribe on disconnect and error paths to avoid leaks and duplicate updates.",
+      "severity": "high"
+    },
+    {
+      "id": "web-serialization-sync",
+      "rule": "When changing API payloads, session/event shapes, or serialization logic, update server routes, client consumers, and serialization tests together.",
+      "severity": "high"
+    }
+  ]
+}
