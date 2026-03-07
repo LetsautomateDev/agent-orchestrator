@@ -292,6 +292,55 @@ describe("enrichSessionPR", () => {
     expect(dashboard.pr?.ciChecks[0]?.name).toBe("test");
   });
 
+  it("should prefer consolidated PR snapshots when SCM supports them", async () => {
+    const pr = createPRInfo();
+    const coreSession = createCoreSession({ pr });
+    const dashboard = sessionToDashboard(coreSession);
+    const scm: SCM = {
+      ...createMockSCM(),
+      getPRSnapshot: vi.fn().mockResolvedValue({
+        state: "open",
+        title: "Snapshot PR",
+        additions: 7,
+        deletions: 2,
+        isDraft: false,
+        ciStatus: "passing",
+        ciChecks: [{ name: "lint", status: "passed", url: "https://example.com/lint" }],
+        reviewDecision: "approved",
+        mergeability: {
+          mergeable: true,
+          ciPassing: true,
+          approved: true,
+          noConflicts: true,
+          blockers: [],
+        },
+        pendingComments: [
+          {
+            id: "c1",
+            author: "alice",
+            body: "Please adjust this",
+            path: "src/app.ts",
+            line: 12,
+            isResolved: false,
+            createdAt: new Date("2025-01-01T00:00:00Z"),
+            url: "https://example.com/comment/1",
+          },
+        ],
+        automatedComments: [],
+        updatedAt: new Date("2025-01-01T00:00:00Z"),
+        rateLimited: false,
+      }),
+    };
+
+    await enrichSessionPR(dashboard, scm, pr);
+
+    expect(scm.getPRSnapshot).toHaveBeenCalledWith(pr);
+    expect(scm.getPRSummary).not.toHaveBeenCalled();
+    expect(dashboard.pr?.title).toBe("Snapshot PR");
+    expect(dashboard.pr?.additions).toBe(7);
+    expect(dashboard.pr?.unresolvedThreads).toBe(1);
+  });
+
   it("should cache successful enrichment results", async () => {
     const pr = createPRInfo();
     const coreSession = createCoreSession({ pr });

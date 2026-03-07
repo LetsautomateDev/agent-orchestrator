@@ -72,6 +72,65 @@ function mockGh(result: unknown): void {
   ghMock.mockResolvedValueOnce({ stdout: JSON.stringify(result) });
 }
 
+function mockExecError(message = "command failed"): void {
+  ghMock.mockRejectedValueOnce(new Error(message));
+}
+
+function makeGraphQLThreads(unresolvedCount = 0): unknown {
+  return {
+    data: {
+      repository: {
+        pullRequest: {
+          reviewThreads: {
+            nodes: Array.from({ length: unresolvedCount }, (_, i) => ({
+              isResolved: false,
+              comments: {
+                nodes: [
+                  {
+                    id: `C${i + 1}`,
+                    author: { login: "alice" },
+                    body: "Please fix this",
+                    path: "src/app.ts",
+                    line: i + 1,
+                    url: `https://github.com/acme/app/pull/42#discussion_r${i + 1}`,
+                    createdAt: "2025-01-01T00:00:00Z",
+                  },
+                ],
+              },
+            })),
+          },
+        },
+      },
+    },
+  };
+}
+
+function mockPRSnapshot(overrides: {
+  state?: "OPEN" | "MERGED" | "CLOSED";
+  reviewDecision?: "APPROVED" | "CHANGES_REQUESTED" | "REVIEW_REQUIRED" | "";
+  statusCheckRollup?: unknown[];
+  unresolvedCount?: number;
+  isDraft?: boolean;
+  mergeable?: string;
+  mergeStateStatus?: string;
+  automatedComments?: unknown[];
+} = {}): void {
+  mockGh({
+    state: overrides.state ?? "OPEN",
+    title: "feat: add feature",
+    additions: 12,
+    deletions: 3,
+    isDraft: overrides.isDraft ?? false,
+    reviewDecision: overrides.reviewDecision ?? "REVIEW_REQUIRED",
+    mergeable: overrides.mergeable ?? "MERGEABLE",
+    mergeStateStatus: overrides.mergeStateStatus ?? "CLEAN",
+    statusCheckRollup: overrides.statusCheckRollup ?? [],
+    updatedAt: "2025-01-01T00:00:00Z",
+  });
+  mockGh(makeGraphQLThreads(overrides.unresolvedCount ?? 0));
+  mockGh(overrides.automatedComments ?? []);
+}
+
 const pr: PRInfo = {
   number: 42,
   url: "https://github.com/acme/app/pull/42",
@@ -329,7 +388,12 @@ describe("plugin integration", () => {
         runtimeHandle: JSON.stringify(makeHandle("rt-1")),
       });
 
-      // Mock gh: issue is closed
+      // list() best-effort PR detection for both sessions → no PR found
+      mockGh([]);
+      mockExecError("git branch failed");
+      mockGh([]);
+      mockExecError("git branch failed");
+      // Mock gh: issue is closed for the regular session
       mockGh({ state: "CLOSED" });
 
       const result = await sm.cleanup("my-app");
@@ -354,6 +418,9 @@ describe("plugin integration", () => {
         runtimeHandle: JSON.stringify(makeHandle("rt-1")),
       });
 
+      // list() best-effort PR detection → no PR found
+      mockGh([]);
+      mockExecError("git branch failed");
       // Mock gh: issue is closed
       mockGh({ state: "CLOSED" });
 
@@ -381,6 +448,9 @@ describe("plugin integration", () => {
         runtimeHandle: JSON.stringify(makeHandle("rt-1")),
       });
 
+      // list() best-effort PR detection → no PR found
+      mockGh([]);
+      mockExecError("git branch failed");
       // Mock gh: issue is still open — runtime also alive
       mockGh({ state: "OPEN" });
 
@@ -489,11 +559,18 @@ describe("plugin integration", () => {
         sessionManager: mockSM,
       });
 
-      // gh calls for determineStatus:
-      // 1. getPRState → open
-      mockGh({ state: "OPEN" });
-      // 2. getCISummary → failing (pr checks returns array of checks with correct field names)
-      mockGh([{ name: "lint", state: "FAILURE", link: "", startedAt: "", completedAt: "" }]);
+      mockPRSnapshot({
+        state: "OPEN",
+        reviewDecision: "REVIEW_REQUIRED",
+        statusCheckRollup: [
+          {
+            __typename: "StatusContext",
+            context: "lint",
+            state: "FAILURE",
+            targetUrl: "",
+          },
+        ],
+      });
 
       await lm.check("app-1");
 
@@ -519,8 +596,7 @@ describe("plugin integration", () => {
         sessionManager: mockSM,
       });
 
-      // getPRState → merged
-      mockGh({ state: "MERGED" });
+      mockPRSnapshot({ state: "MERGED", reviewDecision: "APPROVED" });
 
       await lm.check("app-1");
 
@@ -546,12 +622,18 @@ describe("plugin integration", () => {
         sessionManager: mockSM,
       });
 
-      // 1. getPRState → open
-      mockGh({ state: "OPEN" });
-      // 2. getCISummary → passing (using correct field names: state and link)
-      mockGh([{ name: "lint", state: "SUCCESS", link: "", startedAt: "", completedAt: "" }]);
-      // 3. getReviewDecision (gh pr view with reviewDecision)
-      mockGh({ reviewDecision: "CHANGES_REQUESTED" });
+      mockPRSnapshot({
+        state: "OPEN",
+        reviewDecision: "CHANGES_REQUESTED",
+        statusCheckRollup: [
+          {
+            __typename: "StatusContext",
+            context: "lint",
+            state: "SUCCESS",
+            targetUrl: "",
+          },
+        ],
+      });
 
       await lm.check("app-1");
 

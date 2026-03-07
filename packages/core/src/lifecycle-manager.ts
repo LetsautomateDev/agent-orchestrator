@@ -31,6 +31,7 @@ import {
   type Notifier,
   type Session,
   type EventPriority,
+  type PRSnapshot,
   type ProjectConfig as _ProjectConfig,
 } from "./types.js";
 import { updateMetadata } from "./metadata.js";
@@ -170,6 +171,11 @@ interface ReactionTracker {
   firstTriggered: Date;
 }
 
+interface StatusCheckResult {
+  status: SessionStatus;
+  prSnapshot: PRSnapshot | null;
+}
+
 /** Create a LifecycleManager instance. */
 export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleManager {
   const { config, registry, sessionManager } = deps;
@@ -181,20 +187,21 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
   let allCompleteEmitted = false; // guard against repeated all_complete
 
   /** Determine current status for a session by polling plugins. */
-  async function determineStatus(session: Session): Promise<SessionStatus> {
+  async function determineStatus(session: Session): Promise<StatusCheckResult> {
     const project = config.projects[session.projectId];
-    if (!project) return session.status;
+    if (!project) return { status: session.status, prSnapshot: null };
 
     const agentName = session.metadata["agent"] ?? project.agent ?? config.defaults.agent;
     const agent = registry.get<Agent>("agent", agentName);
     const scm = project.scm ? registry.get<SCM>("scm", project.scm.plugin) : null;
+    let prSnapshot: PRSnapshot | null = null;
 
     // 1. Check if runtime is alive
     if (session.runtimeHandle) {
       const runtime = registry.get<Runtime>("runtime", project.runtime ?? config.defaults.runtime);
       if (runtime) {
         const alive = await runtime.isAlive(session.runtimeHandle).catch(() => true);
-        if (!alive) return "killed";
+        if (!alive) return { status: "killed", prSnapshot };
       }
     }
 
@@ -204,8 +211,8 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
         // Try JSONL-based activity detection first (reads agent's session files directly)
         const activityState = await agent.getActivityState(session, config.readyThresholdMs);
         if (activityState) {
-          if (activityState.state === "waiting_input") return "needs_input";
-          if (activityState.state === "exited") return "killed";
+          if (activityState.state === "waiting_input") return { status: "needs_input", prSnapshot };
+          if (activityState.state === "exited") return { status: "killed", prSnapshot };
           // active/ready/idle/blocked — proceed to PR checks below
         } else {
           // getActivityState returned null — fall back to terminal output parsing
@@ -218,10 +225,10 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
             : "";
           if (terminalOutput) {
             const activity = agent.detectActivity(terminalOutput);
-            if (activity === "waiting_input") return "needs_input";
+            if (activity === "waiting_input") return { status: "needs_input", prSnapshot };
 
             const processAlive = await agent.isProcessRunning(session.runtimeHandle);
-            if (!processAlive) return "killed";
+            if (!processAlive) return { status: "killed", prSnapshot };
           }
         }
       } catch {
@@ -231,7 +238,7 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
           session.status === SESSION_STATUS.STUCK ||
           session.status === SESSION_STATUS.NEEDS_INPUT
         ) {
-          return session.status;
+          return { status: session.status, prSnapshot };
         }
       }
     }
@@ -258,28 +265,50 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
     // 4. Check PR state if PR exists
     if (session.pr && scm) {
       try {
-        const prState = await scm.getPRState(session.pr);
-        if (prState === PR_STATE.MERGED) return "merged";
-        if (prState === PR_STATE.CLOSED) return "killed";
+        if (scm.getPRSnapshot) {
+          prSnapshot = await scm.getPRSnapshot(session.pr);
 
-        // Check CI
-        const ciStatus = await scm.getCISummary(session.pr);
-        if (ciStatus === CI_STATUS.FAILING) return "ci_failed";
+          if (prSnapshot.state === PR_STATE.MERGED) return { status: "merged", prSnapshot };
+          if (prSnapshot.state === PR_STATE.CLOSED) return { status: "killed", prSnapshot };
+          if (prSnapshot.ciStatus === CI_STATUS.FAILING) return { status: "ci_failed", prSnapshot };
+          if (prSnapshot.reviewDecision === "changes_requested") {
+            return { status: "changes_requested", prSnapshot };
+          }
+          if (prSnapshot.pendingComments.length > 0) return { status: "review_pending", prSnapshot };
+          if (prSnapshot.reviewDecision === "approved") {
+            if (prSnapshot.mergeability.mergeable) return { status: "mergeable", prSnapshot };
+            return { status: "approved", prSnapshot };
+          }
+          if (prSnapshot.reviewDecision === "pending") {
+            return { status: "review_pending", prSnapshot };
+          }
 
-        // Check reviews
-        const reviewDecision = await scm.getReviewDecision(session.pr);
-        if (reviewDecision === "changes_requested") return "changes_requested";
-        const pendingComments = await scm.getPendingComments(session.pr);
-        if (Array.isArray(pendingComments) && pendingComments.length > 0) return "review_pending";
-        if (reviewDecision === "approved") {
-          // Check merge readiness
-          const mergeReady = await scm.getMergeability(session.pr);
-          if (mergeReady.mergeable) return "mergeable";
-          return "approved";
+          return { status: "pr_open", prSnapshot };
         }
-        if (reviewDecision === "pending") return "review_pending";
 
-        return "pr_open";
+        const prState = await scm.getPRState(session.pr);
+        if (prState === PR_STATE.MERGED) return { status: "merged", prSnapshot };
+        if (prState === PR_STATE.CLOSED) return { status: "killed", prSnapshot };
+
+        const ciStatus = await scm.getCISummary(session.pr);
+        if (ciStatus === CI_STATUS.FAILING) return { status: "ci_failed", prSnapshot };
+
+        const reviewDecision = await scm.getReviewDecision(session.pr);
+        if (reviewDecision === "changes_requested") {
+          return { status: "changes_requested", prSnapshot };
+        }
+        const pendingComments = await scm.getPendingComments(session.pr);
+        if (Array.isArray(pendingComments) && pendingComments.length > 0) {
+          return { status: "review_pending", prSnapshot };
+        }
+        if (reviewDecision === "approved") {
+          const mergeReady = await scm.getMergeability(session.pr);
+          if (mergeReady.mergeable) return { status: "mergeable", prSnapshot };
+          return { status: "approved", prSnapshot };
+        }
+        if (reviewDecision === "pending") return { status: "review_pending", prSnapshot };
+
+        return { status: "pr_open", prSnapshot };
       } catch {
         // SCM check failed — keep current status
       }
@@ -291,9 +320,9 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
       session.status === SESSION_STATUS.STUCK ||
       session.status === SESSION_STATUS.NEEDS_INPUT
     ) {
-      return "working";
+      return { status: "working", prSnapshot };
     }
-    return session.status;
+    return { status: session.status, prSnapshot };
   }
 
   /** Execute a reaction for a session. */
@@ -448,7 +477,7 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
     const tracked = states.get(session.id);
     const oldStatus =
       tracked ?? ((session.metadata?.["status"] as SessionStatus | undefined) || session.status);
-    const newStatus = await determineStatus(session);
+    const { status: newStatus, prSnapshot } = await determineStatus(session);
 
     if (newStatus !== oldStatus) {
       // State transition detected
@@ -534,7 +563,9 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
     const scm = project?.scm ? registry.get<SCM>("scm", project.scm.plugin) : null;
     if (project && session.pr && scm) {
       try {
-        const automatedComments = await scm.getAutomatedComments(session.pr);
+        const automatedComments = prSnapshot
+          ? prSnapshot.automatedComments
+          : await scm.getAutomatedComments(session.pr);
         if (automatedComments.length > 0) {
           const reactionKey = eventToReactionKey("automated_review.found");
           const trackerKey = reactionKey ? `${session.id}:${reactionKey}` : null;

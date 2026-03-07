@@ -282,7 +282,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     sessionsDir: string,
     plugins: ReturnType<typeof resolvePlugins>,
   ): Promise<void> {
-    if (!session.branch || !plugins.scm) return;
+    if (session.pr || !session.branch || !plugins.scm) return;
 
     try {
       const detected = await plugins.scm.detectPR(session, project);

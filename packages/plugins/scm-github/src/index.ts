@@ -22,6 +22,7 @@ import {
   type ReviewComment,
   type AutomatedComment,
   type MergeReadiness,
+  type PRSnapshot,
 } from "@composio/ao-core";
 
 const execFileAsync = promisify(execFile);
@@ -191,6 +192,274 @@ function mapStatusCheckRollup(items: StatusCheckRollupItem[]): CICheck[] {
   });
 }
 
+function mapPRState(state: string | undefined): PRState {
+  const normalized = state?.toUpperCase();
+  if (normalized === "MERGED") return "merged";
+  if (normalized === "CLOSED") return "closed";
+  return "open";
+}
+
+function mapReviewDecisionValue(reviewDecision: string | undefined | null): ReviewDecision {
+  const normalized = (reviewDecision ?? "").toUpperCase();
+  if (normalized === "APPROVED") return "approved";
+  if (normalized === "CHANGES_REQUESTED") return "changes_requested";
+  if (normalized === "REVIEW_REQUIRED") return "pending";
+  return "none";
+}
+
+function summarizeCIStatus(checks: CICheck[]): CIStatus {
+  if (checks.length === 0) return "none";
+
+  const hasFailing = checks.some((c) => c.status === "failed");
+  if (hasFailing) return "failing";
+
+  const hasPending = checks.some((c) => c.status === "pending" || c.status === "running");
+  if (hasPending) return "pending";
+
+  const hasPassing = checks.some((c) => c.status === "passed");
+  if (!hasPassing) return "none";
+
+  return "passing";
+}
+
+function buildMergeReadiness(opts: {
+  state: PRState;
+  ciStatus: CIStatus;
+  reviewDecision: ReviewDecision;
+  mergeable: string | undefined;
+  mergeStateStatus: string | undefined;
+  isDraft: boolean;
+}): MergeReadiness {
+  if (opts.state === "merged") {
+    return {
+      mergeable: true,
+      ciPassing: true,
+      approved: true,
+      noConflicts: true,
+      blockers: [],
+    };
+  }
+
+  const blockers: string[] = [];
+  const ciPassing = opts.ciStatus === CI_STATUS.PASSING || opts.ciStatus === CI_STATUS.NONE;
+  if (!ciPassing && opts.state === "open") {
+    blockers.push(`CI is ${opts.ciStatus}`);
+  }
+
+  const approved = opts.reviewDecision === "approved";
+  if (opts.reviewDecision === "changes_requested") {
+    blockers.push("Changes requested in review");
+  } else if (opts.reviewDecision === "pending") {
+    blockers.push("Review required");
+  }
+
+  const mergeable = (opts.mergeable ?? "").toUpperCase();
+  const mergeState = (opts.mergeStateStatus ?? "").toUpperCase();
+  const noConflicts = mergeable === "MERGEABLE" || opts.state !== "open";
+  if (opts.state === "open") {
+    if (mergeable === "CONFLICTING") {
+      blockers.push("Merge conflicts");
+    } else if (mergeable === "UNKNOWN" || mergeable === "") {
+      blockers.push("Merge status unknown (GitHub is computing)");
+    }
+    if (mergeState === "BEHIND") {
+      blockers.push("Branch is behind base branch");
+    } else if (mergeState === "BLOCKED") {
+      blockers.push("Merge is blocked by branch protection");
+    } else if (mergeState === "UNSTABLE") {
+      blockers.push("Required checks are failing");
+    }
+    if (opts.isDraft) {
+      blockers.push("PR is still a draft");
+    }
+  }
+
+  return {
+    mergeable: opts.state === "open" ? blockers.length === 0 : false,
+    ciPassing,
+    approved,
+    noConflicts,
+    blockers,
+  };
+}
+
+function isRateLimitError(err: unknown): boolean {
+  const message = String(err).toLowerCase();
+  return message.includes("rate limit") || message.includes("secondary rate limit");
+}
+
+function cloneReviewComment(comment: ReviewComment): ReviewComment {
+  return {
+    ...comment,
+    createdAt: new Date(comment.createdAt),
+  };
+}
+
+function cloneAutomatedComment(comment: AutomatedComment): AutomatedComment {
+  return {
+    ...comment,
+    createdAt: new Date(comment.createdAt),
+  };
+}
+
+function cloneCheck(check: CICheck): CICheck {
+  return {
+    ...check,
+    startedAt: check.startedAt ? new Date(check.startedAt) : undefined,
+    completedAt: check.completedAt ? new Date(check.completedAt) : undefined,
+  };
+}
+
+function cloneSnapshot(snapshot: PRSnapshot): PRSnapshot {
+  return {
+    ...snapshot,
+    updatedAt: new Date(snapshot.updatedAt),
+    ciChecks: snapshot.ciChecks.map(cloneCheck),
+    mergeability: {
+      ...snapshot.mergeability,
+      blockers: [...snapshot.mergeability.blockers],
+    },
+    pendingComments: snapshot.pendingComments.map(cloneReviewComment),
+    automatedComments: snapshot.automatedComments.map(cloneAutomatedComment),
+  };
+}
+
+async function fetchPendingCommentsRaw(pr: PRInfo): Promise<ReviewComment[]> {
+  const raw = await gh([
+    "api",
+    "graphql",
+    "-f",
+    `owner=${pr.owner}`,
+    "-f",
+    `name=${pr.repo}`,
+    "-F",
+    `number=${pr.number}`,
+    "-f",
+    `query=query($owner: String!, $name: String!, $number: Int!) {
+      repository(owner: $owner, name: $name) {
+        pullRequest(number: $number) {
+          reviewThreads(first: 100) {
+            nodes {
+              isResolved
+              comments(first: 1) {
+                nodes {
+                  id
+                  author { login }
+                  body
+                  path
+                  line
+                  url
+                  createdAt
+                }
+              }
+            }
+          }
+        }
+      }
+    }`,
+  ]);
+
+  const data: {
+    data: {
+      repository: {
+        pullRequest: {
+          reviewThreads: {
+            nodes: Array<{
+              isResolved: boolean;
+              comments: {
+                nodes: Array<{
+                  id: string;
+                  author: { login: string } | null;
+                  body: string;
+                  path: string | null;
+                  line: number | null;
+                  url: string;
+                  createdAt: string;
+                }>;
+              };
+            }>;
+          };
+        };
+      };
+    };
+  } = JSON.parse(raw);
+
+  const threads = data.data.repository.pullRequest.reviewThreads.nodes;
+
+  return threads
+    .filter((t) => {
+      if (t.isResolved) return false;
+      const c = t.comments.nodes[0];
+      if (!c) return false;
+      return !isKnownBotAuthor(c.author?.login);
+    })
+    .map((t) => {
+      const c = t.comments.nodes[0];
+      return {
+        id: c.id,
+        author: c.author?.login ?? "unknown",
+        body: c.body,
+        path: c.path || undefined,
+        line: c.line ?? undefined,
+        isResolved: t.isResolved,
+        createdAt: parseDate(c.createdAt),
+        url: c.url,
+      };
+    });
+}
+
+async function fetchAutomatedCommentsRaw(pr: PRInfo): Promise<AutomatedComment[]> {
+  const raw = await gh([
+    "api",
+    "-F",
+    "per_page=100",
+    `repos/${repoFlag(pr)}/pulls/${pr.number}/comments`,
+  ]);
+
+  const comments: Array<{
+    id: number;
+    user: { login: string };
+    body: string;
+    path: string;
+    line: number | null;
+    original_line: number | null;
+    created_at: string;
+    html_url: string;
+  }> = JSON.parse(raw);
+
+  return comments
+    .filter((c) => isKnownBotAuthor(c.user?.login))
+    .map((c) => {
+      let severity: AutomatedComment["severity"] = "info";
+      const bodyLower = c.body.toLowerCase();
+      if (
+        bodyLower.includes("error") ||
+        bodyLower.includes("bug") ||
+        bodyLower.includes("critical") ||
+        bodyLower.includes("potential issue")
+      ) {
+        severity = "error";
+      } else if (
+        bodyLower.includes("warning") ||
+        bodyLower.includes("suggest") ||
+        bodyLower.includes("consider")
+      ) {
+        severity = "warning";
+      }
+
+      return {
+        id: String(c.id),
+        botName: c.user?.login ?? "unknown",
+        body: c.body,
+        path: c.path || undefined,
+        line: c.line ?? c.original_line ?? undefined,
+        severity,
+        createdAt: parseDate(c.created_at),
+        url: c.html_url,
+      };
+    });
+}
+
 function pickBestPR<T extends { state?: string; updatedAt?: string; createdAt?: string }>(
   prs: T[],
 ): T | null {
@@ -213,6 +482,159 @@ function pickBestPR<T extends { state?: string; updatedAt?: string; createdAt?: 
 // ---------------------------------------------------------------------------
 
 function createGitHubSCM(): SCM {
+  const SNAPSHOT_TTL_MS = 45_000;
+  const RATE_LIMIT_BASE_BACKOFF_MS = 30_000;
+  const RATE_LIMIT_MAX_BACKOFF_MS = 5 * 60_000;
+
+  const snapshotCache = new Map<string, { snapshot: PRSnapshot; expiresAt: number }>();
+  const snapshotBackoff = new Map<string, { delayMs: number; retryAt: number }>();
+
+  function snapshotKey(pr: PRInfo): string {
+    return `${repoFlag(pr)}#${pr.number}`;
+  }
+
+  function getFreshSnapshot(key: string): PRSnapshot | null {
+    const entry = snapshotCache.get(key);
+    if (!entry) return null;
+    if (Date.now() > entry.expiresAt) return null;
+    return cloneSnapshot(entry.snapshot);
+  }
+
+  function getStaleSnapshot(key: string): PRSnapshot | null {
+    const entry = snapshotCache.get(key);
+    return entry ? cloneSnapshot(entry.snapshot) : null;
+  }
+
+  function cacheSnapshot(key: string, snapshot: PRSnapshot, ttlMs = SNAPSHOT_TTL_MS): PRSnapshot {
+    const cloned = cloneSnapshot(snapshot);
+    snapshotCache.set(key, {
+      snapshot: cloned,
+      expiresAt: Date.now() + ttlMs,
+    });
+    return cloneSnapshot(cloned);
+  }
+
+  function markRateLimited(
+    key: string,
+    staleSnapshot: PRSnapshot | null,
+    error: unknown,
+  ): PRSnapshot | null {
+    if (!isRateLimitError(error)) return null;
+
+    const prev = snapshotBackoff.get(key);
+    const delayMs = Math.min(
+      prev ? prev.delayMs * 2 : RATE_LIMIT_BASE_BACKOFF_MS,
+      RATE_LIMIT_MAX_BACKOFF_MS,
+    );
+    snapshotBackoff.set(key, {
+      delayMs,
+      retryAt: Date.now() + delayMs,
+    });
+
+    if (!staleSnapshot) return null;
+
+    const rateLimitedSnapshot = cloneSnapshot(staleSnapshot);
+    rateLimitedSnapshot.rateLimited = true;
+    return cacheSnapshot(key, rateLimitedSnapshot, delayMs);
+  }
+
+  async function fetchPRSnapshot(pr: PRInfo): Promise<PRSnapshot> {
+    const key = snapshotKey(pr);
+    const fresh = getFreshSnapshot(key);
+    if (fresh) return fresh;
+
+    const backoff = snapshotBackoff.get(key);
+    const stale = getStaleSnapshot(key);
+    if (backoff && Date.now() < backoff.retryAt && stale) {
+      stale.rateLimited = true;
+      return stale;
+    }
+
+    try {
+      const prViewPromise = gh([
+        "pr",
+        "view",
+        String(pr.number),
+        "--repo",
+        repoFlag(pr),
+        "--json",
+        "state,title,additions,deletions,isDraft,reviewDecision,mergeable,mergeStateStatus,statusCheckRollup,updatedAt",
+      ]);
+
+      const [prViewRaw, pendingR, automatedR] = await Promise.all([
+        prViewPromise,
+        Promise.allSettled([fetchPendingCommentsRaw(pr), fetchAutomatedCommentsRaw(pr)]),
+      ]).then(([summary, settled]) => [summary, settled[0], settled[1]] as const);
+
+      const summary: {
+        state: string;
+        title: string;
+        additions: number;
+        deletions: number;
+        isDraft: boolean;
+        reviewDecision: string;
+        mergeable: string;
+        mergeStateStatus: string;
+        statusCheckRollup?: StatusCheckRollupItem[] | null;
+        updatedAt?: string;
+      } = JSON.parse(prViewRaw);
+
+      const state = mapPRState(summary.state);
+      const ciChecks = mapStatusCheckRollup(summary.statusCheckRollup ?? []);
+      const ciStatus = summarizeCIStatus(ciChecks);
+      const reviewDecision = mapReviewDecisionValue(summary.reviewDecision);
+
+      let rateLimited = false;
+      let pendingComments = stale?.pendingComments ?? [];
+      if (pendingR.status === "fulfilled") {
+        pendingComments = pendingR.value;
+      } else if (isRateLimitError(pendingR.reason)) {
+        rateLimited = true;
+      } else {
+        pendingComments = [];
+      }
+
+      let automatedComments = stale?.automatedComments ?? [];
+      if (automatedR.status === "fulfilled") {
+        automatedComments = automatedR.value;
+      } else if (isRateLimitError(automatedR.reason)) {
+        rateLimited = true;
+      } else {
+        automatedComments = [];
+      }
+
+      const snapshot: PRSnapshot = {
+        state,
+        title: summary.title ?? pr.title,
+        additions: summary.additions ?? 0,
+        deletions: summary.deletions ?? 0,
+        isDraft: summary.isDraft ?? pr.isDraft,
+        ciStatus,
+        ciChecks,
+        reviewDecision,
+        mergeability: buildMergeReadiness({
+          state,
+          ciStatus,
+          reviewDecision,
+          mergeable: summary.mergeable,
+          mergeStateStatus: summary.mergeStateStatus,
+          isDraft: summary.isDraft ?? pr.isDraft,
+        }),
+        pendingComments,
+        automatedComments,
+        updatedAt: parseDate(summary.updatedAt),
+        rateLimited,
+      };
+
+      snapshotBackoff.delete(key);
+      return cacheSnapshot(key, snapshot, rateLimited ? RATE_LIMIT_BASE_BACKOFF_MS : SNAPSHOT_TTL_MS);
+    } catch (error) {
+      const rateLimitedSnapshot = markRateLimited(key, stale, error);
+      if (rateLimitedSnapshot) return rateLimitedSnapshot;
+      throw error;
+    }
+  }
+
   return {
     name: "github",
 
@@ -364,6 +786,10 @@ function createGitHubSCM(): SCM {
       };
     },
 
+    async getPRSnapshot(pr: PRInfo): Promise<PRSnapshot> {
+      return fetchPRSnapshot(pr);
+    },
+
     async mergePR(pr: PRInfo, method: MergeMethod = "squash"): Promise<void> {
       const flag = method === "rebase" ? "--rebase" : method === "merge" ? "--merge" : "--squash";
 
@@ -478,98 +904,12 @@ function createGitHubSCM(): SCM {
         "reviewDecision",
       ]);
       const data: { reviewDecision: string } = JSON.parse(raw);
-
-      const d = (data.reviewDecision ?? "").toUpperCase();
-      if (d === "APPROVED") return "approved";
-      if (d === "CHANGES_REQUESTED") return "changes_requested";
-      if (d === "REVIEW_REQUIRED") return "pending";
-      return "none";
+      return mapReviewDecisionValue(data.reviewDecision);
     },
 
     async getPendingComments(pr: PRInfo): Promise<ReviewComment[]> {
       try {
-        // Use GraphQL with variables to get review threads with actual isResolved status
-        const raw = await gh([
-          "api",
-          "graphql",
-          "-f",
-          `owner=${pr.owner}`,
-          "-f",
-          `name=${pr.repo}`,
-          "-F",
-          `number=${pr.number}`,
-          "-f",
-          `query=query($owner: String!, $name: String!, $number: Int!) {
-            repository(owner: $owner, name: $name) {
-              pullRequest(number: $number) {
-                reviewThreads(first: 100) {
-                  nodes {
-                    isResolved
-                    comments(first: 1) {
-                      nodes {
-                        id
-                        author { login }
-                        body
-                        path
-                        line
-                        url
-                        createdAt
-                      }
-                    }
-                  }
-                }
-              }
-            }
-          }`,
-        ]);
-
-        const data: {
-          data: {
-            repository: {
-              pullRequest: {
-                reviewThreads: {
-                  nodes: Array<{
-                    isResolved: boolean;
-                    comments: {
-                      nodes: Array<{
-                        id: string;
-                        author: { login: string } | null;
-                        body: string;
-                        path: string | null;
-                        line: number | null;
-                        url: string;
-                        createdAt: string;
-                      }>;
-                    };
-                  }>;
-                };
-              };
-            };
-          };
-        } = JSON.parse(raw);
-
-        const threads = data.data.repository.pullRequest.reviewThreads.nodes;
-
-        return threads
-          .filter((t) => {
-            if (t.isResolved) return false; // only pending (unresolved) threads
-            const c = t.comments.nodes[0];
-            if (!c) return false; // skip threads with no comments
-            return !isKnownBotAuthor(c.author?.login);
-          })
-          .map((t) => {
-            const c = t.comments.nodes[0];
-            return {
-              id: c.id,
-              author: c.author?.login ?? "unknown",
-              body: c.body,
-              path: c.path || undefined,
-              line: c.line ?? undefined,
-              isResolved: t.isResolved,
-              createdAt: parseDate(c.createdAt),
-              url: c.url,
-            };
-          });
+        return await fetchPendingCommentsRaw(pr);
       } catch {
         return [];
       }
@@ -577,57 +917,7 @@ function createGitHubSCM(): SCM {
 
     async getAutomatedComments(pr: PRInfo): Promise<AutomatedComment[]> {
       try {
-        // Fetch all review comments with max page size (100 is GitHub's limit)
-        const raw = await gh([
-          "api",
-          "-F",
-          "per_page=100",
-          `repos/${repoFlag(pr)}/pulls/${pr.number}/comments`,
-        ]);
-
-        const comments: Array<{
-          id: number;
-          user: { login: string };
-          body: string;
-          path: string;
-          line: number | null;
-          original_line: number | null;
-          created_at: string;
-          html_url: string;
-        }> = JSON.parse(raw);
-
-        return comments
-          .filter((c) => isKnownBotAuthor(c.user?.login))
-          .map((c) => {
-            // Determine severity from body content
-            let severity: AutomatedComment["severity"] = "info";
-            const bodyLower = c.body.toLowerCase();
-            if (
-              bodyLower.includes("error") ||
-              bodyLower.includes("bug") ||
-              bodyLower.includes("critical") ||
-              bodyLower.includes("potential issue")
-            ) {
-              severity = "error";
-            } else if (
-              bodyLower.includes("warning") ||
-              bodyLower.includes("suggest") ||
-              bodyLower.includes("consider")
-            ) {
-              severity = "warning";
-            }
-
-            return {
-              id: String(c.id),
-              botName: c.user?.login ?? "unknown",
-              body: c.body,
-              path: c.path || undefined,
-              line: c.line ?? c.original_line ?? undefined,
-              severity,
-              createdAt: parseDate(c.created_at),
-              url: c.html_url,
-            };
-          });
+        return await fetchAutomatedCommentsRaw(pr);
       } catch {
         return [];
       }

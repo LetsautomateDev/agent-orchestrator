@@ -847,6 +847,88 @@ describe("scm-github plugin", () => {
     });
   });
 
+  // ---- getPRSnapshot -----------------------------------------------------
+
+  describe("getPRSnapshot", () => {
+    function makeSnapshotThreads() {
+      return {
+        data: {
+          repository: {
+            pullRequest: {
+              reviewThreads: {
+                nodes: [
+                  {
+                    isResolved: false,
+                    comments: {
+                      nodes: [
+                        {
+                          id: "C1",
+                          author: { login: "alice" },
+                          body: "Fix this branch",
+                          path: "src/foo.ts",
+                          line: 10,
+                          url: "https://github.com/c/1",
+                          createdAt: "2025-01-01T00:00:00Z",
+                        },
+                      ],
+                    },
+                  },
+                ],
+              },
+            },
+          },
+        },
+      };
+    }
+
+    it("returns a consolidated PR snapshot", async () => {
+      mockGh({
+        state: "OPEN",
+        title: "feat: add feature",
+        additions: 12,
+        deletions: 4,
+        isDraft: false,
+        reviewDecision: "CHANGES_REQUESTED",
+        mergeable: "CONFLICTING",
+        mergeStateStatus: "BLOCKED",
+        statusCheckRollup: [
+          {
+            __typename: "StatusContext",
+            context: "lint",
+            state: "FAILURE",
+            targetUrl: "https://ci.example.com/lint",
+          },
+        ],
+        updatedAt: "2025-01-01T00:00:00Z",
+      });
+      mockGh(makeSnapshotThreads());
+      mockGh([
+        {
+          id: 1,
+          user: { login: "cursor[bot]" },
+          body: "Found a potential issue",
+          path: "src/foo.ts",
+          line: 11,
+          original_line: null,
+          created_at: "2025-01-01T00:00:00Z",
+          html_url: "https://github.com/c/auto-1",
+        },
+      ]);
+
+      const snapshot = await scm.getPRSnapshot?.(pr);
+
+      expect(snapshot).toBeDefined();
+      expect(snapshot?.state).toBe("open");
+      expect(snapshot?.ciStatus).toBe("failing");
+      expect(snapshot?.reviewDecision).toBe("changes_requested");
+      expect(snapshot?.pendingComments).toHaveLength(1);
+      expect(snapshot?.automatedComments).toHaveLength(1);
+      expect(snapshot?.mergeability.blockers).toContain("Changes requested in review");
+      expect(snapshot?.mergeability.blockers).toContain("Merge conflicts");
+      expect(snapshot?.rateLimited).toBe(false);
+    });
+  });
+
   // ---- getMergeability ---------------------------------------------------
 
   describe("getMergeability", () => {

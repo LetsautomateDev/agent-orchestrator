@@ -61,6 +61,7 @@ export default async function Home() {
           sessions[i].pr.title = cached.title;
           sessions[i].pr.additions = cached.additions;
           sessions[i].pr.deletions = cached.deletions;
+          sessions[i].pr.isDraft = cached.isDraft;
           sessions[i].pr.ciStatus = cached.ciStatus as "none" | "pending" | "passing" | "failing";
           sessions[i].pr.reviewDecision = cached.reviewDecision as
             | "none"
