@@ -30,7 +30,23 @@ export async function generateMetadata(): Promise<Metadata> {
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en" className={`dark ${ibmPlexSans.variable} ${ibmPlexMono.variable}`}>
+    <html lang="en" suppressHydrationWarning className={`${ibmPlexSans.variable} ${ibmPlexMono.variable}`}>
+      <head>
+        <script
+          dangerouslySetInnerHTML={{
+            __html: `(() => {
+              try {
+                const stored = window.localStorage.getItem("ao-theme");
+                const theme = stored || (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+                document.documentElement.dataset.theme = theme;
+                document.documentElement.classList.toggle("dark", theme === "dark");
+              } catch {
+                document.documentElement.dataset.theme = "light";
+              }
+            })();`,
+          }}
+        />
+      </head>
       <body className="bg-[var(--color-bg-base)] text-[var(--color-text-primary)] antialiased">
         {children}
       </body>

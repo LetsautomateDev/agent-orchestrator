@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import { Dashboard } from "@/components/Dashboard";
-import type { DashboardSession } from "@/lib/types";
-import { getServices, getSCM } from "@/lib/services";
+import type { DashboardIssue, DashboardSession } from "@/lib/types";
+import { getServices, getSCM, getTracker } from "@/lib/services";
 import {
   sessionToDashboard,
   resolveProject,
@@ -22,6 +22,8 @@ export async function generateMetadata(): Promise<Metadata> {
 
 export default async function Home() {
   let sessions: DashboardSession[] = [];
+  let issues: DashboardIssue[] = [];
+  let hasIssuesTab = false;
   let orchestratorId: string | null = null;
   const projectName = getProjectName();
   try {
@@ -42,6 +44,43 @@ export default async function Home() {
     // Enrich metadata (issue labels, agent summaries, issue titles) — cap at 3s
     const metaTimeout = new Promise<void>((resolve) => setTimeout(resolve, 3_000));
     await Promise.race([enrichSessionsMetadata(coreSessions, sessions, config, registry), metaTimeout]);
+
+    // Fetch tracker issues for projects that support listing
+    const trackerProjects = Object.entries(config.projects)
+      .map(([projectId, project]) => ({
+        projectId,
+        project,
+        tracker: getTracker(registry, project),
+      }))
+      .filter((entry) => Boolean(entry.tracker?.listIssues));
+    hasIssuesTab = trackerProjects.length > 0;
+
+    const issuePromises = trackerProjects.map(async ({ projectId, project, tracker }) => {
+      if (!tracker?.listIssues) return [] as DashboardIssue[];
+
+      try {
+        const projectIssues = await tracker.listIssues({ state: "open", limit: 50 }, project);
+        return projectIssues.map((issue) => ({
+          ...issue,
+          projectId,
+          projectName: project.name,
+          repo: project.repo,
+        }));
+      } catch {
+        return [] as DashboardIssue[];
+      }
+    });
+    const issuesTimeout = new Promise<DashboardIssue[]>((resolve) => setTimeout(() => resolve([]), 3_000));
+    issues = (await Promise.race([
+      Promise.all(issuePromises).then((results) => results.flat()),
+      issuesTimeout,
+    ])).sort((a, b) => {
+      if (a.projectName !== b.projectName) return a.projectName.localeCompare(b.projectName);
+      const aNum = Number(a.id);
+      const bNum = Number(b.id);
+      if (!Number.isNaN(aNum) && !Number.isNaN(bNum)) return aNum - bNum;
+      return a.id.localeCompare(b.id);
+    });
 
     // Enrich sessions that have PRs with live SCM data
     // Skip enrichment for terminal sessions (merged, closed, done, terminated)
@@ -102,6 +141,13 @@ export default async function Home() {
   }
 
   return (
-    <Dashboard initialSessions={sessions} stats={computeStats(sessions)} orchestratorId={orchestratorId} projectName={projectName} />
+    <Dashboard
+      initialSessions={sessions}
+      initialIssues={issues}
+      hasIssuesTab={hasIssuesTab}
+      stats={computeStats(sessions)}
+      orchestratorId={orchestratorId}
+      projectName={projectName}
+    />
   );
 }

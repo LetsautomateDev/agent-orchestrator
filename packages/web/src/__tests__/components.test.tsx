@@ -1,11 +1,18 @@
 import { describe, it, expect, vi } from "vitest";
-import { render, screen, fireEvent } from "@testing-library/react";
+import { render, screen, fireEvent, act, waitFor } from "@testing-library/react";
 import { CIBadge, CICheckList } from "@/components/CIBadge";
+import { Dashboard } from "@/components/Dashboard";
 import { PRStatus } from "@/components/PRStatus";
 import { SessionCard } from "@/components/SessionCard";
 import { AttentionZone } from "@/components/AttentionZone";
 import { ActivityDot } from "@/components/ActivityDot";
 import { makeSession, makePR } from "./helpers";
+
+const routerRefreshMock = vi.fn();
+
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({ refresh: routerRefreshMock }),
+}));
 
 // ── ActivityDot ───────────────────────────────────────────────────────
 
@@ -421,7 +428,7 @@ describe("SessionCard", () => {
     expect(screen.queryByText("INT-100")).not.toBeInTheDocument();
     // Click the card (not a button/link)
     fireEvent.click(container.firstElementChild!);
-    expect(screen.getByText("INT-100")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /INT-100: Test issue/ })).toBeInTheDocument();
     expect(screen.getByText("No PR associated with this session.")).toBeInTheDocument();
   });
 
@@ -492,5 +499,93 @@ describe("AttentionZone", () => {
     render(<AttentionZone level="respond" sessions={sessions} onRestore={onRestore} />);
     fireEvent.click(screen.getByText("restore"));
     expect(onRestore).toHaveBeenCalledWith("s1");
+  });
+});
+
+// ── Dashboard ────────────────────────────────────────────────────────
+
+describe("Dashboard", () => {
+  it("switches to issues tab and renders tracker issues", () => {
+    vi.stubGlobal("EventSource", class {
+      close() {}
+    });
+
+    render(
+      <Dashboard
+        initialSessions={[makeSession({ id: "agent-1" })]}
+        initialIssues={[
+          {
+            id: "42",
+            title: "Add project issues tab",
+            description: "",
+            url: "https://github.com/acme/app/issues/42",
+            state: "open",
+            labels: ["dashboard", "github"],
+            assignee: "alice",
+            projectId: "my-app",
+            projectName: "My App",
+            repo: "acme/app",
+          },
+        ]}
+        hasIssuesTab
+        stats={{ totalSessions: 1, workingSessions: 1, openPRs: 0, needsReview: 0 }}
+        orchestratorId={null}
+        projectName="My App"
+      />,
+    );
+
+    fireEvent.click(screen.getByText("Issues"));
+
+    expect(screen.getAllByText("#42").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Add project issues tab").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("dashboard").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("alice").length).toBeGreaterThan(0);
+  });
+
+  it("spawns an agent for an issue", async () => {
+    vi.stubGlobal("EventSource", class {
+      close() {}
+    });
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ session: { id: "my-app-1" } }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <Dashboard
+        initialSessions={[]}
+        initialIssues={[
+          {
+            id: "42",
+            title: "Add spawn action",
+            description: "",
+            url: "https://github.com/acme/app/issues/42",
+            state: "open",
+            labels: [],
+            projectId: "my-app",
+            projectName: "My App",
+            repo: "acme/app",
+          },
+        ]}
+        hasIssuesTab
+        stats={{ totalSessions: 0, workingSessions: 0, openPRs: 0, needsReview: 0 }}
+        orchestratorId={null}
+        projectName="My App"
+      />,
+    );
+
+    fireEvent.click(screen.getByText("Issues"));
+    await act(async () => {
+      fireEvent.click(screen.getAllByRole("button", { name: "spawn" })[0]);
+    });
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith("/api/spawn", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ projectId: "my-app", issueId: "42" }),
+      });
+    });
   });
 });
