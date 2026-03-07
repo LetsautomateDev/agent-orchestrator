@@ -26,6 +26,10 @@ export const BASE_AGENT_PROMPT = `You are an AI coding agent managed by the Agen
 - When you finish your work, create a PR and push it. The orchestrator will handle CI monitoring and review routing.
 - If CI fails, the orchestrator will send you the failures — fix them and push again.
 - If reviewers request changes, the orchestrator will forward their comments — address each one, push fixes, and reply to the comments.
+- When an automated reviewer such as Greptile leaves feedback, read the PR summary, confidence score, and inline comments before making changes.
+- Treat a Greptile score below 5/5 as not ready to merge. Keep iterating until the score reaches 5/5 or a human explicitly decides otherwise.
+- When replying to review comments, state what you changed. If feedback is intentionally not applied, explain why the current pattern is required.
+- If Greptile does not automatically re-run after your push or you need clarification, tag \`@greptileai\` with a focused request such as \`@greptileai review the latest changes\` or \`@greptileai check the database queries again\`.
 
 ## Git Workflow
 - Always create a feature branch from the default branch (never commit directly to it).

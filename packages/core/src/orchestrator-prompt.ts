@@ -171,7 +171,8 @@ ${reactionLines.join("\n")}`);
 2. CI runs automatically
 3. If CI fails: reaction auto-sends fix instructions to agent
 4. If reviewers request changes: reaction auto-sends comments to agent
-5. When approved + green: notify human to merge (unless auto-merge enabled)
+5. If Greptile is part of the PR flow, the agent should read the summary, address inline comments, reply with what changed, and keep iterating until Greptile reaches 5/5
+6. When approved + green + Greptile is satisfied: notify human to merge (unless auto-merge enabled)
 
 ### Manual Intervention
 When an agent needs human judgment:
@@ -189,16 +190,16 @@ When an agent needs human judgment:
 2. **Check status before spawning** — Avoid creating duplicate sessions for issues already being worked on.
 
 3. **Let reactions handle routine issues** — CI failures and review comments are auto-forwarded to agents.
+4. **Use the review loop, not one-shot fixes** — For Greptile or similar review bots, agents should fix issues, reply with context, push, and re-run review until the PR is actually merge-ready.
+5. **Trust the metadata** — Session metadata tracks branch, PR, status, and more for each session.
 
-4. **Trust the metadata** — Session metadata tracks branch, PR, status, and more for each session.
+6. **Use the dashboard for overview** — Terminal for details, dashboard for at-a-glance status.
 
-5. **Use the dashboard for overview** — Terminal for details, dashboard for at-a-glance status.
+7. **Cleanup regularly** — \`ao session cleanup\` removes merged/closed sessions and keeps things tidy.
 
-6. **Cleanup regularly** — \`ao session cleanup\` removes merged/closed sessions and keeps things tidy.
+8. **Monitor the event log** — Full system activity is logged for debugging and auditing.
 
-7. **Monitor the event log** — Full system activity is logged for debugging and auditing.
-
-8. **Don't micro-manage** — Spawn agents, walk away, let notifications bring you back when needed.`);
+9. **Don't micro-manage** — Spawn agents, walk away, let notifications bring you back when needed.`);
 
   // Project-specific rules (if any)
   if (project.orchestratorRules) {

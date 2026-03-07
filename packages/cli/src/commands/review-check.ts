@@ -134,7 +134,7 @@ export function registerReviewCheck(program: Command): void {
             await exec("tmux", ["send-keys", "-t", result.tmuxTarget, "C-u"]);
             await new Promise((resolve) => setTimeout(resolve, 200));
             const message =
-              "There are review comments on your PR. Check with `gh pr view --comments` and `gh api` for inline comments. Address each one, push fixes, and reply.";
+              "There are review comments on your PR. Review the PR summary and inline comments with `gh pr view --comments` and `gh api`, address each issue, push fixes, and reply to every comment with what changed or why it is intentional. If Greptile is involved, treat anything below 5/5 as not ready, iterate until it reaches 5/5, and tag `@greptileai` if you need a re-review or a focused follow-up question.";
             await exec("tmux", ["send-keys", "-t", result.tmuxTarget, "-l", message]);
             await new Promise((resolve) => setTimeout(resolve, 200));
             await exec("tmux", ["send-keys", "-t", result.tmuxTarget, "Enter"]);

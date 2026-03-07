@@ -251,13 +251,14 @@ function applyDefaultReactions(config: OrchestratorConfig): OrchestratorConfig {
       auto: true,
       action: "send-to-agent",
       message:
-        "There are review comments on your PR. Check with `gh pr view --comments` and `gh api` for inline comments. Address each one, push fixes, and reply.",
+        "There are review comments on your PR. Review the PR summary and inline comments with `gh pr view --comments` and `gh api`, address each issue, push fixes, and reply to every comment with what changed or why it is intentional. If Greptile is involved, treat anything below 5/5 as not ready, iterate until it reaches 5/5, and tag `@greptileai` if you need a re-review or a focused follow-up question.",
       escalateAfter: "30m",
     },
     "bugbot-comments": {
       auto: true,
       action: "send-to-agent",
-      message: "Automated review comments found on your PR. Fix the issues flagged by the bot.",
+      message:
+        "Automated review comments found on your PR. Inspect the bot summary and inline comments, fix the flagged issues, push, and reply with what changed or why the pattern is intentional. If the bot is Greptile, use the confidence score as the bar: keep iterating until it reaches 5/5, and tag `@greptileai` for re-review or a specific follow-up question when needed.",
       escalateAfter: "30m",
     },
     "merge-conflicts": {

@@ -212,5 +212,8 @@ describe("BASE_AGENT_PROMPT", () => {
     expect(BASE_AGENT_PROMPT).toContain("Session Lifecycle");
     expect(BASE_AGENT_PROMPT).toContain("Git Workflow");
     expect(BASE_AGENT_PROMPT).toContain("PR Best Practices");
+    expect(BASE_AGENT_PROMPT).toContain("Greptile");
+    expect(BASE_AGENT_PROMPT).toContain("@greptileai");
+    expect(BASE_AGENT_PROMPT).toContain("5/5");
   });
 });
