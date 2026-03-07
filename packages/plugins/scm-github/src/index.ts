@@ -31,6 +31,7 @@ const execFileAsync = promisify(execFile);
 const BOT_AUTHORS = new Set([
   "cursor[bot]",
   "github-actions[bot]",
+  "greptile-apps",
   "codecov[bot]",
   "sonarcloud[bot]",
   "dependabot[bot]",
@@ -56,24 +57,6 @@ function isKnownBotAuthor(login: string | null | undefined): boolean {
   }
 
   return false;
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-async function gh(args: string[]): Promise<string> {
-  try {
-    const { stdout } = await execFileAsync("gh", args, {
-      maxBuffer: 10 * 1024 * 1024,
-      timeout: 30_000,
-    });
-    return stdout.trim();
-  } catch (err) {
-    throw new Error(`gh ${args.slice(0, 3).join(" ")} failed: ${(err as Error).message}`, {
-      cause: err,
-    });
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -156,13 +139,99 @@ function prInfoFromView(
   };
 }
 
-// ---------------------------------------------------------------------------
-// SCM implementation
-// ---------------------------------------------------------------------------
+type StatusCheckRollupItem =
+  | {
+      __typename: "CheckRun";
+      name?: string;
+      status?: string;
+      conclusion?: string;
+      detailsUrl?: string;
+      startedAt?: string;
+      completedAt?: string;
+    }
+  | {
+      __typename: "StatusContext";
+      context?: string;
+      state?: string;
+      targetUrl?: string;
+      startedAt?: string;
+    };
 
-function createGitHubSCM(): SCM {
-  return {
-    name: "github",
+function mapCheckRunStatus(
+  status: string | undefined,
+  conclusion: string | undefined,
+): CICheck["status"] {
+  const normalizedStatus = status?.toUpperCase();
+  const normalizedConclusion = conclusion?.toUpperCase();
+
+  if (
+    normalizedStatus === "QUEUED" ||
+    normalizedStatus === "PENDING" ||
+    normalizedStatus === "REQUESTED" ||
+    normalizedStatus === "WAITING"
+  ) {
+    return "pending";
+  }
+  if (normalizedStatus === "IN_PROGRESS") return "running";
+
+  if (normalizedConclusion === "SUCCESS") return "passed";
+  if (normalizedConclusion === "SKIPPED" || normalizedConclusion === "NEUTRAL") return "skipped";
+  if (
+    normalizedConclusion === "FAILURE" ||
+    normalizedConclusion === "TIMED_OUT" ||
+    normalizedConclusion === "CANCELLED" ||
+    normalizedConclusion === "ACTION_REQUIRED" ||
+    normalizedConclusion === "STALE" ||
+    normalizedConclusion === "STARTUP_FAILURE"
+  ) {
+    return "failed";
+  }
+
+  return normalizedStatus === "COMPLETED" ? "failed" : "pending";
+}
+
+function mapStatusContextState(state: string | undefined): CICheck["status"] {
+  const normalizedState = state?.toUpperCase();
+  if (normalizedState === "SUCCESS") return "passed";
+  if (normalizedState === "PENDING" || normalizedState === "EXPECTED") return "pending";
+  if (normalizedState === "FAILURE" || normalizedState === "ERROR") return "failed";
+  return "failed";
+}
+
+function mapStatusCheckRollup(items: StatusCheckRollupItem[]): CICheck[] {
+  return items.flatMap((item) => {
+    if (item.__typename === "CheckRun") {
+      const name = item.name?.trim();
+      if (!name) return [];
+      const status = mapCheckRunStatus(item.status, item.conclusion);
+      const conclusion = item.conclusion?.toUpperCase() || item.status?.toUpperCase() || undefined;
+      return [
+        {
+          name,
+          status,
+          url: item.detailsUrl || undefined,
+          conclusion,
+          startedAt: item.startedAt ? new Date(item.startedAt) : undefined,
+          completedAt: item.completedAt ? new Date(item.completedAt) : undefined,
+        },
+      ];
+    }
+
+    const name = item.context?.trim();
+    if (!name) return [];
+    const status = mapStatusContextState(item.state);
+    return [
+      {
+        name,
+        status,
+        url: item.targetUrl || undefined,
+        conclusion: item.state?.toUpperCase() || undefined,
+        startedAt: item.startedAt ? new Date(item.startedAt) : undefined,
+        completedAt: undefined,
+      },
+    ];
+  });
+}
 
 function mapPRState(state: string | undefined): PRState {
   const normalized = state?.toUpperCase();
@@ -454,7 +523,7 @@ function pickBestPR<T extends { state?: string; updatedAt?: string; createdAt?: 
 // ---------------------------------------------------------------------------
 
 function createGitHubSCM(): SCM {
-  const SNAPSHOT_TTL_MS = 45_000;
+  const SNAPSHOT_TTL_MS = 0;
   const RATE_LIMIT_BASE_BACKOFF_MS = 30_000;
   const RATE_LIMIT_MAX_BACKOFF_MS = 5 * 60_000;
 
@@ -609,6 +678,48 @@ function createGitHubSCM(): SCM {
 
   return {
     name: "github",
+
+    async resolvePR(reference: string, project: ProjectConfig): Promise<PRInfo> {
+      const raw = await gh([
+        "pr",
+        "view",
+        reference,
+        "--repo",
+        project.repo,
+        "--json",
+        "number,url,title,headRefName,baseRefName,isDraft",
+      ]);
+
+      const data: {
+        number: number;
+        url: string;
+        title: string;
+        headRefName: string;
+        baseRefName: string;
+        isDraft: boolean;
+      } = JSON.parse(raw);
+
+      return prInfoFromView(data, project.repo);
+    },
+
+    async assignPRToCurrentUser(pr: PRInfo): Promise<void> {
+      await gh(["pr", "edit", String(pr.number), "--repo", repoFlag(pr), "--add-assignee", "@me"]);
+    },
+
+    async checkoutPR(pr: PRInfo, workspacePath: string): Promise<boolean> {
+      const currentBranch = await git(["branch", "--show-current"], workspacePath);
+      if (currentBranch === pr.branch) return false;
+
+      const dirty = await git(["status", "--porcelain"], workspacePath);
+      if (dirty) {
+        throw new Error(
+          `Workspace has uncommitted changes; cannot switch to PR branch "${pr.branch}" safely`,
+        );
+      }
+
+      await ghInDir(["pr", "checkout", String(pr.number), "--repo", repoFlag(pr)], workspacePath);
+      return true;
+    },
 
     async detectPR(session: Session, project: ProjectConfig): Promise<PRInfo | null> {
       if (!session.branch) return null;

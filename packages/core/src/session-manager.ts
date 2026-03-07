@@ -360,6 +360,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     sessionsDir: string,
     plugins: ReturnType<typeof resolvePlugins>,
   ): Promise<void> {
+    if (session.metadata["prAutoDetect"] === "off") return;
     if (session.pr || !session.branch || !plugins.scm) return;
 
     try {

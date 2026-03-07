@@ -161,6 +161,8 @@ export interface LifecycleManagerDeps {
   config: OrchestratorConfig;
   registry: PluginRegistry;
   sessionManager: SessionManager;
+  /** When set, only poll sessions belonging to this project. */
+  projectId?: string;
 }
 
 /** Track attempt counts for reactions per session. */
@@ -176,7 +178,7 @@ interface StatusCheckResult {
 
 /** Create a LifecycleManager instance. */
 export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleManager {
-  const { config, registry, sessionManager } = deps;
+  const { config, registry, sessionManager, projectId: scopedProjectId } = deps;
 
   const states = new Map<SessionId, SessionStatus>();
   const reactionTrackers = new Map<string, ReactionTracker>(); // "sessionId:reactionKey"
@@ -244,7 +246,7 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
     // 3. Auto-detect PR by branch if metadata.pr is missing.
     //    This is critical for agents without auto-hook systems (Codex, Aider,
     //    OpenCode) that can't reliably write pr=<url> to metadata on their own.
-    if (!session.pr && scm && session.branch) {
+    if (!session.pr && scm && session.branch && session.metadata["prAutoDetect"] !== "off") {
       try {
         const detectedPR = await scm.detectPR(session, project);
         if (detectedPR) {
@@ -264,24 +266,29 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
     if (session.pr && scm) {
       try {
         if (scm.getPRSnapshot) {
-          prSnapshot = await scm.getPRSnapshot(session.pr);
+          const snapshot = await scm.getPRSnapshot(session.pr);
+          if (snapshot) {
+            prSnapshot = snapshot;
 
-          if (prSnapshot.state === PR_STATE.MERGED) return { status: "merged", prSnapshot };
-          if (prSnapshot.state === PR_STATE.CLOSED) return { status: "killed", prSnapshot };
-          if (prSnapshot.ciStatus === CI_STATUS.FAILING) return { status: "ci_failed", prSnapshot };
-          if (prSnapshot.reviewDecision === "changes_requested") {
-            return { status: "changes_requested", prSnapshot };
-          }
-          if (prSnapshot.pendingComments.length > 0) return { status: "review_pending", prSnapshot };
-          if (prSnapshot.reviewDecision === "approved") {
-            if (prSnapshot.mergeability.mergeable) return { status: "mergeable", prSnapshot };
-            return { status: "approved", prSnapshot };
-          }
-          if (prSnapshot.reviewDecision === "pending") {
-            return { status: "review_pending", prSnapshot };
-          }
+            if (prSnapshot.state === PR_STATE.MERGED) return { status: "merged", prSnapshot };
+            if (prSnapshot.state === PR_STATE.CLOSED) return { status: "killed", prSnapshot };
+            if (prSnapshot.ciStatus === CI_STATUS.FAILING) return { status: "ci_failed", prSnapshot };
+            if (prSnapshot.reviewDecision === "changes_requested") {
+              return { status: "changes_requested", prSnapshot };
+            }
+            if (prSnapshot.pendingComments.length > 0) {
+              return { status: "review_pending", prSnapshot };
+            }
+            if (prSnapshot.reviewDecision === "approved") {
+              if (prSnapshot.mergeability.mergeable) return { status: "mergeable", prSnapshot };
+              return { status: "approved", prSnapshot };
+            }
+            if (prSnapshot.reviewDecision === "pending") {
+              return { status: "review_pending", prSnapshot };
+            }
 
-          return { status: "pr_open", prSnapshot };
+            return { status: "pr_open", prSnapshot };
+          }
         }
 
         const prState = await scm.getPRState(session.pr);
@@ -450,6 +457,115 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
     };
   }
 
+  function updateSessionMetadata(
+    session: Session,
+    updates: Record<string, string>,
+  ): void {
+    const project = config.projects[session.projectId];
+    if (!project) return;
+
+    updateMetadata(getSessionsDir(config.configPath, project.path), session.id, updates);
+    Object.assign(session.metadata, updates);
+  }
+
+  function makeFingerprint(ids: string[]): string {
+    return [...ids].sort().join(",");
+  }
+
+  async function maybeDispatchReviewBacklog(
+    session: Session,
+    prSnapshot: PRSnapshot | null,
+    oldStatus: SessionStatus,
+    newStatus: SessionStatus,
+  ): Promise<void> {
+    const project = config.projects[session.projectId];
+    const scm = project?.scm ? registry.get<SCM>("scm", project.scm.plugin) : null;
+    if (!project || !session.pr || !scm) return;
+
+    try {
+      const pendingComments = prSnapshot
+        ? prSnapshot.pendingComments
+        : await scm.getPendingComments(session.pr);
+      const pendingFingerprint = makeFingerprint(pendingComments.map((comment) => comment.id));
+      const lastPendingDispatchHash = session.metadata["lastPendingReviewDispatchHash"] ?? "";
+      if (
+        pendingFingerprint &&
+        pendingFingerprint !== lastPendingDispatchHash &&
+        !(oldStatus !== newStatus && newStatus === "changes_requested")
+      ) {
+        const reactionKey = eventToReactionKey("review.changes_requested");
+        if (reactionKey) {
+          const globalReaction = config.reactions[reactionKey];
+          const projectReaction = project.reactions?.[reactionKey];
+          const reactionConfig = projectReaction
+            ? { ...globalReaction, ...projectReaction }
+            : globalReaction;
+          if (reactionConfig && reactionConfig.action) {
+            if (reactionConfig.auto !== false || reactionConfig.action === "notify") {
+              const result = await executeReaction(
+                session.id,
+                session.projectId,
+                reactionKey,
+                reactionConfig as ReactionConfig,
+              );
+              if (result.success) {
+                updateSessionMetadata(session, {
+                  lastPendingReviewDispatchHash: pendingFingerprint,
+                });
+              }
+            }
+          }
+        }
+      } else if (
+        pendingFingerprint &&
+        pendingFingerprint !== lastPendingDispatchHash &&
+        oldStatus !== newStatus &&
+        newStatus === "changes_requested"
+      ) {
+        updateSessionMetadata(session, {
+          lastPendingReviewDispatchHash: pendingFingerprint,
+        });
+      }
+    } catch {
+      // Best-effort only.
+    }
+
+    try {
+      const automatedComments = prSnapshot
+        ? prSnapshot.automatedComments
+        : await scm.getAutomatedComments(session.pr);
+      const automatedFingerprint = makeFingerprint(automatedComments.map((comment) => comment.id));
+      const lastAutomatedDispatchHash = session.metadata["lastAutomatedReviewDispatchHash"] ?? "";
+      if (automatedFingerprint && automatedFingerprint !== lastAutomatedDispatchHash) {
+        const reactionKey = eventToReactionKey("automated_review.found");
+        if (reactionKey) {
+          const globalReaction = config.reactions[reactionKey];
+          const projectReaction = project.reactions?.[reactionKey];
+          const reactionConfig = projectReaction
+            ? { ...globalReaction, ...projectReaction }
+            : globalReaction;
+          if (reactionConfig && reactionConfig.action) {
+            if (reactionConfig.auto !== false || reactionConfig.action === "notify") {
+              const result = await executeReaction(
+                session.id,
+                session.projectId,
+                reactionKey,
+                reactionConfig as ReactionConfig,
+              );
+              if (result.success) {
+                updateSessionMetadata(session, {
+                  lastAutomatedReviewDispatchHash: automatedFingerprint,
+                });
+              }
+            }
+          }
+        }
+      }
+    } catch {
+      // Best-effort only.
+    }
+  }
+
   /** Send a notification to all configured notifiers. */
   async function notifyHuman(event: OrchestratorEvent, priority: EventPriority): Promise<void> {
     const eventWithPriority = { ...event, priority };
@@ -554,25 +670,8 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
       states.set(session.id, newStatus);
     }
 
-    // Separate from status transitions: bot review comments should be able to
-    // wake the agent even when GitHub doesn't emit CHANGES_REQUESTED or when
-    // unresolved-thread GraphQL is temporarily rate-limited.
-    const project = config.projects[session.projectId];
-    const scm = project?.scm ? registry.get<SCM>("scm", project.scm.plugin) : null;
-    if (project && session.pr && scm) {
-      try {
-        const automatedComments = prSnapshot
-          ? prSnapshot.automatedComments
-          : await scm.getAutomatedComments(session.pr);
-        if (automatedComments.length > 0) {
-          const reactionKey = eventToReactionKey("automated_review.found");
-          const trackerKey = reactionKey ? `${session.id}:${reactionKey}` : null;
-          if (reactionKey && trackerKey && !reactionTrackers.has(trackerKey)) {
-            const globalReaction = config.reactions[reactionKey];
-            const projectReaction = project.reactions?.[reactionKey];
-            const reactionConfig = projectReaction
-              ? { ...globalReaction, ...projectReaction }
-              : globalReaction;
+    await maybeDispatchReviewBacklog(session, prSnapshot, oldStatus, newStatus);
+  }
 
   /** Run one polling cycle across all sessions. */
   async function pollAll(): Promise<void> {
