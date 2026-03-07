@@ -508,15 +508,6 @@ export interface SCM {
   /** Detect if a session has an open PR (by branch name) */
   detectPR(session: Session, project: ProjectConfig): Promise<PRInfo | null>;
 
-  /** Resolve a PR reference (number or URL) into canonical PR metadata. */
-  resolvePR?(reference: string, project: ProjectConfig): Promise<PRInfo>;
-
-  /** Assign a PR to the currently authenticated user, if supported. */
-  assignPRToCurrentUser?(pr: PRInfo): Promise<void>;
-
-  /** Check out the PR branch into a workspace. Returns true if branch changed. */
-  checkoutPR?(pr: PRInfo, workspacePath: string): Promise<boolean>;
-
   /** Get current PR state */
   getPRState(pr: PRInfo): Promise<PRState>;
 
@@ -527,6 +518,13 @@ export interface SCM {
     additions: number;
     deletions: number;
   }>;
+
+  /**
+   * Get a consolidated PR snapshot suitable for polling loops and dashboards.
+   * Implementations should prefer a minimal number of upstream API calls and
+   * may return cached data with `rateLimited=true` when upstream is throttling.
+   */
+  getPRSnapshot?(pr: PRInfo): Promise<PRSnapshot>;
 
   /** Merge a PR */
   mergePR(pr: PRInfo, method?: MergeMethod): Promise<void>;
@@ -583,6 +581,22 @@ export const PR_STATE = {
   MERGED: "merged" as const,
   CLOSED: "closed" as const,
 } satisfies Record<string, PRState>;
+
+export interface PRSnapshot {
+  state: PRState;
+  title: string;
+  additions: number;
+  deletions: number;
+  isDraft: boolean;
+  ciStatus: CIStatus;
+  ciChecks: CICheck[];
+  reviewDecision: ReviewDecision;
+  mergeability: MergeReadiness;
+  pendingComments: ReviewComment[];
+  automatedComments: AutomatedComment[];
+  updatedAt: Date;
+  rateLimited: boolean;
+}
 
 export type MergeMethod = "merge" | "squash" | "rebase";
 
@@ -981,7 +995,6 @@ export interface SessionMetadata {
   tmuxName?: string; // Globally unique tmux session name (includes hash)
   issue?: string;
   pr?: string;
-  prAutoDetect?: "on" | "off";
   summary?: string;
   project?: string;
   agent?: string; // Agent plugin name (e.g. "codex", "claude-code") — persisted for lifecycle
@@ -1008,22 +1021,6 @@ export interface SessionManager {
   kill(sessionId: SessionId): Promise<void>;
   cleanup(projectId?: string, options?: { dryRun?: boolean }): Promise<CleanupResult>;
   send(sessionId: SessionId, message: string): Promise<void>;
-  claimPR(sessionId: SessionId, prRef: string, options?: ClaimPROptions): Promise<ClaimPRResult>;
-}
-
-export interface ClaimPROptions {
-  assignOnGithub?: boolean;
-  takeover?: boolean;
-}
-
-export interface ClaimPRResult {
-  sessionId: SessionId;
-  projectId: string;
-  pr: PRInfo;
-  branchChanged: boolean;
-  githubAssigned: boolean;
-  githubAssignmentError?: string;
-  takenOverFrom: SessionId[];
 }
 
 export interface CleanupResult {

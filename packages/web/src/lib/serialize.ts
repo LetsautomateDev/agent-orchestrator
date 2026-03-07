@@ -10,6 +10,7 @@ import type {
   Agent,
   SCM,
   PRInfo,
+  PRSnapshot,
   Tracker,
   ProjectConfig,
   OrchestratorConfig,
@@ -20,6 +21,7 @@ import { TTLCache, prCache, prCacheKey, type PREnrichmentData } from "./cache";
 
 /** Cache for issue titles (5 min TTL — issue titles rarely change) */
 const issueTitleCache = new TTLCache<string>(300_000);
+const RATE_LIMIT_CACHE_TTL_MS = 90_000;
 
 /** Resolve which project a session belongs to. */
 export function resolveProject(
@@ -98,6 +100,57 @@ function basicPRToDashboard(pr: PRInfo): DashboardPR {
   };
 }
 
+function applyCachedPRData(dashboard: DashboardSession, cached: PREnrichmentData): boolean {
+  if (!dashboard.pr) return false;
+
+  dashboard.pr.state = cached.state;
+  dashboard.pr.title = cached.title;
+  dashboard.pr.additions = cached.additions;
+  dashboard.pr.deletions = cached.deletions;
+  dashboard.pr.isDraft = cached.isDraft;
+  dashboard.pr.ciStatus = cached.ciStatus;
+  dashboard.pr.ciChecks = cached.ciChecks;
+  dashboard.pr.reviewDecision = cached.reviewDecision;
+  dashboard.pr.mergeability = cached.mergeability;
+  dashboard.pr.unresolvedThreads = cached.unresolvedThreads;
+  dashboard.pr.unresolvedComments = cached.unresolvedComments;
+  return true;
+}
+
+function snapshotToCacheData(snapshot: PRSnapshot): PREnrichmentData {
+  const mergeability = {
+    ...snapshot.mergeability,
+    blockers: [...snapshot.mergeability.blockers],
+  };
+
+  if (snapshot.rateLimited && !mergeability.blockers.includes("API rate limited or unavailable")) {
+    mergeability.blockers.push("API rate limited or unavailable");
+  }
+
+  return {
+    state: snapshot.state,
+    title: snapshot.title,
+    additions: snapshot.additions,
+    deletions: snapshot.deletions,
+    isDraft: snapshot.isDraft,
+    ciStatus: snapshot.ciStatus,
+    ciChecks: snapshot.ciChecks.map((c) => ({
+      name: c.name,
+      status: c.status,
+      url: c.url,
+    })),
+    reviewDecision: snapshot.reviewDecision,
+    mergeability,
+    unresolvedThreads: snapshot.pendingComments.length,
+    unresolvedComments: snapshot.pendingComments.map((c) => ({
+      url: c.url,
+      path: c.path ?? "",
+      author: c.author,
+      body: c.body,
+    })),
+  };
+}
+
 /**
  * Enrich a DashboardSession's PR with live data from the SCM plugin.
  * Uses cache to reduce API calls and handles rate limit errors gracefully.
@@ -114,22 +167,53 @@ export async function enrichSessionPR(
 
   // Check cache first
   const cached = prCache.get(cacheKey);
-  if (cached && dashboard.pr) {
-    dashboard.pr.state = cached.state;
-    dashboard.pr.title = cached.title;
-    dashboard.pr.additions = cached.additions;
-    dashboard.pr.deletions = cached.deletions;
-    dashboard.pr.ciStatus = cached.ciStatus;
-    dashboard.pr.ciChecks = cached.ciChecks;
-    dashboard.pr.reviewDecision = cached.reviewDecision;
-    dashboard.pr.mergeability = cached.mergeability;
-    dashboard.pr.unresolvedThreads = cached.unresolvedThreads;
-    dashboard.pr.unresolvedComments = cached.unresolvedComments;
-    return true;
-  }
+  if (cached) return applyCachedPRData(dashboard, cached);
 
   // Cache miss — if cacheOnly, signal caller to refresh in background
   if (opts?.cacheOnly) return false;
+
+  if (scm.getPRSnapshot) {
+    try {
+      const snapshot = await scm.getPRSnapshot(pr);
+      const cacheData = snapshotToCacheData(snapshot);
+      applyCachedPRData(dashboard, cacheData);
+      prCache.set(
+        cacheKey,
+        cacheData,
+        snapshot.rateLimited ? RATE_LIMIT_CACHE_TTL_MS : undefined,
+      );
+      return true;
+    } catch (error) {
+      console.warn(
+        `[enrichSessionPR] snapshot fetch failed for PR #${pr.number} (rate limited or unavailable):`,
+        String(error),
+      );
+      if (dashboard.pr) {
+        dashboard.pr.mergeability.blockers = ["API rate limited or unavailable"];
+      }
+      const fallbackData: PREnrichmentData = {
+        state: dashboard.pr?.state ?? "open",
+        title: dashboard.pr?.title ?? pr.title,
+        additions: dashboard.pr?.additions ?? 0,
+        deletions: dashboard.pr?.deletions ?? 0,
+        isDraft: dashboard.pr?.isDraft ?? pr.isDraft,
+        ciStatus: dashboard.pr?.ciStatus ?? "none",
+        ciChecks: dashboard.pr?.ciChecks ?? [],
+        reviewDecision: dashboard.pr?.reviewDecision ?? "none",
+        mergeability: dashboard.pr?.mergeability ?? {
+          mergeable: false,
+          ciPassing: false,
+          approved: false,
+          noConflicts: true,
+          blockers: ["API rate limited or unavailable"],
+        },
+        unresolvedThreads: dashboard.pr?.unresolvedThreads ?? 0,
+        unresolvedComments: dashboard.pr?.unresolvedComments ?? [],
+      };
+      prCache.set(cacheKey, fallbackData, RATE_LIMIT_CACHE_TTL_MS);
+      return true;
+    }
+  }
 
   // Fetch from SCM
   const results = await Promise.allSettled([
@@ -225,6 +309,7 @@ export async function enrichSessionPR(
       title: dashboard.pr.title,
       additions: dashboard.pr.additions,
       deletions: dashboard.pr.deletions,
+      isDraft: dashboard.pr.isDraft,
       ciStatus: dashboard.pr.ciStatus,
       ciChecks: dashboard.pr.ciChecks,
       reviewDecision: dashboard.pr.reviewDecision,
@@ -232,7 +317,7 @@ export async function enrichSessionPR(
       unresolvedThreads: dashboard.pr.unresolvedThreads,
       unresolvedComments: dashboard.pr.unresolvedComments,
     };
-    prCache.set(cacheKey, rateLimitedData, 60 * 60_000); // 60 min — GitHub rate limit resets hourly
+    prCache.set(cacheKey, rateLimitedData, RATE_LIMIT_CACHE_TTL_MS);
     return true;
   }
 
@@ -241,6 +326,7 @@ export async function enrichSessionPR(
     title: dashboard.pr.title,
     additions: dashboard.pr.additions,
     deletions: dashboard.pr.deletions,
+    isDraft: dashboard.pr.isDraft,
     ciStatus: dashboard.pr.ciStatus,
     ciChecks: dashboard.pr.ciChecks,
     reviewDecision: dashboard.pr.reviewDecision,
